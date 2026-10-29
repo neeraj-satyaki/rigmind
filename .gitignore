@@ -4,7 +4,6 @@ web/
 slm-*/
 node_modules/
 .output/
-*.pt
 *.gguf
 *.engine
 *.so
