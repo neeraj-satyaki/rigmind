@@ -1,0 +1,179 @@
+@import "tailwindcss" source(none);
+@source "../src";
+@import "tw-animate-css";
+
+@custom-variant dark (&:is(.dark *));
+
+@theme inline {
+  --font-sans: "IBM Plex Sans", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, monospace;
+  /* Satyaki Solutions sets its own wordmark in Poppins; keep it identical here. */
+  --font-brand: "Poppins", ui-sans-serif, system-ui, sans-serif;
+  /* Satyaki's wordmark colours come from its own logo artwork: deep maroon
+     with a gold under-line. They stay fixed to the brand, not the app theme. */
+  --color-brand-word: var(--brand-word);
+  --color-brand-sub: var(--brand-sub);
+
+  --radius-sm: 4px;
+  --radius-md: 6px;
+  --radius-lg: 8px;
+  --radius-xl: 12px;
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-hover: var(--primary-hover);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-field: var(--field);
+  --color-ring: var(--ring);
+  --color-nav-active: var(--nav-active);
+  --color-critical: var(--critical);
+  --color-critical-bg: var(--critical-bg);
+  --color-warning: var(--warning);
+  --color-warning-bg: var(--warning-bg);
+  --color-advisory: var(--advisory);
+  --color-advisory-bg: var(--advisory-bg);
+  --color-success: var(--success);
+  --color-success-bg: var(--success-bg);
+  --color-neutral: var(--neutral);
+  --color-neutral-bg: var(--neutral-bg);
+  --color-slate: var(--slate);
+  --color-slate-foreground: var(--slate-foreground);
+  --color-chart-crit: var(--chart-crit);
+  --color-chart-warn: var(--chart-warn);
+  --color-chart-adv: var(--chart-adv);
+  --color-zone: var(--zone);
+  --color-monitor-zone: var(--monitor-zone);
+  --color-detect: var(--detect);
+  --color-deployed: var(--deployed);
+  --color-chart-1: var(--chart-1);
+  --color-chart-2: var(--chart-2);
+  --color-chart-3: var(--chart-3);
+  --color-chart-4: var(--chart-4);
+  --color-chart-5: var(--chart-5);
+  --color-sidebar: var(--sidebar);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar-primary: var(--sidebar-primary);
+  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-sidebar-ring: var(--sidebar-ring);
+}
+
+:root {
+  --radius: 8px;
+  --background: #f1f4f7;
+  --foreground: #172131;
+  --card: #ffffff;
+  --card-foreground: #172131;
+  --popover: #ffffff;
+  --popover-foreground: #172131;
+  --primary: #2361b5;
+  --primary-hover: #1b4f96;
+  --primary-foreground: #ffffff;
+  --secondary: #f1f4f7;
+  --secondary-foreground: #172131;
+  --muted: #f1f4f7;
+  --muted-foreground: #4a5566;
+  --accent: #e8f0fb;
+  --accent-foreground: #2361b5;
+  --destructive: #b4351e;
+  --destructive-foreground: #ffffff;
+  --border: #dce2e9;
+  --input: #dce2e9;
+  --field: #f5f7fa;
+  --ring: #2361b5;
+  --nav-active: #e8f0fb;
+  --critical: #b4351e;
+  --critical-bg: #fdf1ee;
+  --warning: #8a5300;
+  --warning-bg: #fff8ec;
+  --advisory: #2559a8;
+  --advisory-bg: #f0f5fd;
+  --success: #1d6e45;
+  --success-bg: #f0f8f3;
+  --neutral: #2b3544;
+  --neutral-bg: #f1f4f7;
+  --slate: #3b4350;
+  --slate-foreground: #ffffff;
+  --chart-crit: #b4351e;
+  --chart-warn: #d9a35a;
+  --chart-adv: #8aade0;
+  --zone: #f2b33d;
+  --monitor-zone: #f29a1f;
+  --detect: #3fd0e0;
+  --deployed: #3fbf7a;
+  --chart-1: #2361b5;
+  --chart-2: #8aade0;
+  --chart-3: #d9a35a;
+  --chart-4: #b4351e;
+  --chart-5: #1d6e45;
+  --sidebar: #ffffff;
+  --sidebar-foreground: #172131;
+  --sidebar-primary: #2361b5;
+  --sidebar-primary-foreground: #ffffff;
+  --sidebar-accent: #e8f0fb;
+  --sidebar-accent-foreground: #2361b5;
+  --sidebar-border: #dce2e9;
+  --sidebar-ring: #2361b5;
+  --brand-word: #9c0210;
+  --brand-sub: #8a6a00;
+
+}
+
+@layer base {
+  * {
+    border-color: var(--color-border);
+  }
+  body {
+    background-color: var(--color-background);
+    color: var(--color-foreground);
+    font-family: var(--font-sans);
+    font-size: 14px;
+  }
+}
+
+@utility eyebrow {
+  font-size: 11px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  font-weight: 600;
+  color: var(--color-muted-foreground);
+}
+
+.dark {
+ color-scheme: dark;
+ --background: #16191e; --foreground: #eef1f5; --card: #20252c; --card-foreground: #eef1f5;
+ --popover: #20252c; --popover-foreground: #eef1f5; --field: #292f37; --border: #3b444e; --input: #3b444e;
+ --muted: #292f37; --muted-foreground: #b2becb; --secondary: #292f37; --secondary-foreground: #eef1f5;
+ --primary: #78a8e7; --primary-hover: #91b9ee; --primary-foreground: #101b2c; --nav-active: #293b52;
+ --accent: #293b52; --accent-foreground: #b3d2fa; --ring: #78a8e7;
+ --critical: #ff9e8c; --critical-bg: #462a27; --warning: #f6c170; --warning-bg: #453b29;
+ --advisory: #a9c9f4; --advisory-bg: #293b52; --success: #8ed1ac; --success-bg: #273f34;
+ --neutral: #d4dce6; --neutral-bg: #292f37; --sidebar: #20252c; --sidebar-foreground: #eef1f5;
+ --sidebar-border: #3b444e; --sidebar-accent: #293b52; --sidebar-accent-foreground: #b3d2fa;
+ --brand-word: #ffc954; --brand-sub: #e2b500;
+
+}
+
+
+/* Trademark mark next to the RigMind wordmark */
+.tm{font-size:.55em;font-weight:500;vertical-align:super;line-height:0;margin-left:1px}
+/* Phones: the wordmark carries no trademark mark at any size that fits. */
+@media (max-width: 767px) {
+  .tm{display:none}
+}

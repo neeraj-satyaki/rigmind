@@ -1,0 +1,9 @@
+# Windows build and test container (Linux engine): mingw-w64 cross compiler + Wine runtime.
+# Windows containers need a Windows kernel, so the Windows binaries are built here and run under Wine.
+FROM ubuntu:24.04
+ENV DEBIAN_FRONTEND=noninteractive
+RUN dpkg --add-architecture i386 \
+ && apt-get update \
+ && apt-get install -y --no-install-recommends cmake make g++-mingw-w64-x86-64-posix wine64 xvfb ca-certificates \
+ && rm -rf /var/lib/apt/lists/*
+WORKDIR /src

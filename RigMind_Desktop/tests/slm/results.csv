@@ -1,0 +1,5 @@
+case,status,sentence,reason
+critical collision with camera and place,PASS,"28 Oct 2026 21:28, camera cam-01 at demo rig 01 · Derrick board recorded: Platform- elevator collision.",
+warning elevator near platform,FALLBACK,Instruction: Write one sentence for a site supervisor.,leaked 'write one'
+advisory link tilt without place,PASS,"At 28 Oct 2026 21:28, camera cam-05 recorded: Link-tilt angled.",
+critical without camera,PASS,"At 28 Oct 2026 21:28, an event occurred at Demo rig 01.",

@@ -1,0 +1,30 @@
+[
+  {
+    "name": "critical collision with camera and place",
+    "event": {"alertId": "EV-3001", "severity": "Critical", "condition": "Platform-elevator collision",
+              "place": "Demo rig 01 · Derrick board", "camId": "CAM-01", "tsMs": 1793203115196},
+    "meaning_word": "immediate",
+    "must_contain": ["collision", "CAM-01", "Derrick"]
+  },
+  {
+    "name": "warning elevator near platform",
+    "event": {"alertId": "EV-3002", "severity": "Warning", "condition": "Elevator near platform",
+              "place": "Demo rig 02 · Drill floor", "camId": "CAM-03", "tsMs": 1793203115196},
+    "meaning_word": "soon",
+    "must_contain": ["elevator", "CAM-03", "Drill"]
+  },
+  {
+    "name": "advisory link tilt without place",
+    "event": {"alertId": "EV-3003", "severity": "Advisory", "condition": "Link-tilt angled",
+              "place": "", "camId": "CAM-05", "tsMs": 1793203115196},
+    "meaning_word": "information",
+    "must_contain": ["tilt", "CAM-05"]
+  },
+  {
+    "name": "critical without camera",
+    "event": {"alertId": "EV-3004", "severity": "Critical", "condition": "Platform-elevator collision",
+              "place": "Demo rig 01 · Derrick board", "camId": "", "tsMs": 1793203115196},
+    "meaning_word": "immediate",
+    "must_contain": ["collision", "Derrick"]
+  }
+]

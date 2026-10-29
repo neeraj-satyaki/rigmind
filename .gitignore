@@ -1,0 +1,14 @@
+build*/
+dist/
+web/
+slm-*/
+node_modules/
+.output/
+*.onnx
+*.pt
+*.gguf
+*.engine
+*.so
+*.run
+*.tar.gz
+__pycache__/

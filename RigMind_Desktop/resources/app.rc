@@ -1,0 +1,26 @@
+#include <windows.h>
+#include "resource.h"
+
+// Icon generated from src/assets/rigmind-loader.png (16, 32, 48, 256 px).
+IDI_APP ICON "rigmind.ico"
+
+VS_VERSION_INFO VERSIONINFO
+ FILEVERSION 1,0,0,0
+ PRODUCTVERSION 1,0,0,0
+BEGIN
+  BLOCK "StringFileInfo"
+  BEGIN
+    BLOCK "040904B0"
+    BEGIN
+      VALUE "CompanyName", "Satyaki Solutions Pvt Ltd"
+      VALUE "FileDescription", "RigMind"
+      VALUE "ProductName", "RigMind"
+      VALUE "FileVersion", "1.0.0.0"
+      VALUE "ProductVersion", "1.0.0"
+    END
+  END
+  BLOCK "VarFileInfo"
+  BEGIN
+    VALUE "Translation", 0x0409, 1200
+  END
+END
