@@ -1,0 +1,72 @@
+{
+  "version": 1,
+  "note": "Starting values, not tuned on site footage. Edit this file, then run: python scripts/inference_cfg.py encode",
+  "defaults": {
+    "imgsz": 640,
+    "conf": 0.25,
+    "iou": 0.45,
+    "max_det": 100,
+    "classes": null,
+    "agnostic_nms": false,
+    "half": false,
+    "device": "auto"
+  },
+  "models": {
+    "ppe": {
+      "file": "ppe.onnx",
+      "task": "detect",
+      "conf": 0.25,
+      "iou": 0.45
+    },
+    "idss": {
+      "file": "idss_model.onnx",
+      "task": "segment",
+      "conf": 0.3,
+      "iou": 0.5
+    }
+  },
+  "roi": {
+    "enabled": true,
+    "reference_class": "platform",
+    "hold_frames": 30,
+    "note": "Platform-based dynamic ROI (IDSS-derived). Detections whose centroid is outside the Platform rect scaled by the auto_scale factor are dropped before the EWS rules; the Platform itself is always kept. Held for 'hold_frames' frames when the Platform is missing, then no ROI (whole frame). Changes alarm results: re-run the test cases when you change it. Class names are those inside idss_model.onnx (actuator, derrickman, elevators, machine, platform); matching is case-insensitive."
+  },
+  "auto_scale": {
+    "enabled": true,
+    "wide": 1.2,
+    "zoomed": 1.4,
+    "zoomed_if_platform_width_fraction_at_least": 0.3,
+    "hysteresis": 0.03,
+    "median_frames": 5,
+    "note": "No operator zoom flag. 'force' pins the scale: \"zoomed\" (1.4) or \"wide\" (1.2) is used for every frame and the size rule is ignored. Set force to null to let the Platform mask decide: width >= zoomed_if_platform_width_fraction_at_least of the frame width means zoomed, else wide. Applies to the ROI scale and the platform overlay scale_x. The 0.30 starting value is NOT tuned: confirm it on site footage before relying on it.",
+    "force": "wide"
+  },
+  "stream": {
+    "output_fps": 12.5,
+    "note": "Frame rate of the live view and of the frames sent to inference. Frames are dropped, never duplicated. Set lower if inference cannot keep up."
+  },
+  "tracking": {
+    "enabled": true,
+    "algorithm": "bytetrack",
+    "high_thresh": 0.5,
+    "low_thresh": 0.15,
+    "new_track_thresh": 0.25,
+    "match_thresh": 0.8,
+    "track_buffer_s": 1.0,
+    "min_hits": 2,
+    "note": "ByteTrack on the PPE boxes (display, detections events, PPE check) and on the IDSS 'derrickman' boxes (person ids for the PPE check only; the EWS facts never see the tracker). The PPE model runs internally down to low_thresh so weak boxes keep a track alive; new tracks still need max(new_track_thresh, the model conf). track_buffer_s: how long a lost box is kept and drawn at its predicted position. Environment RIGMIND_TRACKING=off disables it for A/B tests. Tracking hides flicker; it cannot make the model detect a class it never detects."
+  },
+  "ppe_check": {
+    "enabled": true,
+    "required": [
+      "helmet",
+      "vest",
+      "gloves"
+    ],
+    "person_class": "derrickman",
+    "person_box_pad": 0.15,
+    "missing_seconds": 5,
+    "clear_seconds": 3,
+    "note": "Each person found by the IDSS model (person_class) is checked for the required PPE. An item counts as present when a PPE box of that class has its centre inside the person box enlarged by person_box_pad. An item missing for missing_seconds raises an Advisory 'PPE not detected: <items>' (the camera may simply not see the item, so the wording is never 'not worn'); it clears after clear_seconds with the item present. No person in view: no check. Class names are matched case-insensitively (vest, safety_vest, hi-vis; glove, gloves; helmet, hardhat)."
+  }
+}

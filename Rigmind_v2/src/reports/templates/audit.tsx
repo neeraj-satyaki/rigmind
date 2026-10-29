@@ -1,8 +1,16 @@
 import { DataTable, Findings, InfoNote, MetaStrip, ReportFooter, ReportHeader, StatusPill } from "../components";
 import { auditReportFindings, auditReportRows } from "@/data/mock";
 import { exportCsv } from "@/lib/demo-export";
+import { demoDataEnabled } from "@/lib/demo-mode";
+import { AUDIT_ACTIONS, auditActionLabel, auditActor, loadAuditEntries, stamp } from "@/lib/real-data";
+import { RealAuditReport } from "../real-templates";
 
-export function downloadAuditCsv() {
+export async function downloadAuditCsv() {
+  if (!demoDataEnabled()) {
+    const rows = await loadAuditEntries(AUDIT_ACTIONS, 200);
+    exportCsv("rigmind-audit", rows.map((r) => ({ Time: stamp(r.tsMs), Actor: auditActor(r.source), Action: auditActionLabel(r.action), Entity: r.target, Detail: r.detail })));
+    return;
+  }
   exportCsv(
     "rigmind-audit",
     auditReportRows.map((r) => ({
@@ -16,6 +24,10 @@ export function downloadAuditCsv() {
 }
 
 export function AuditReport({ page }: { page: string }) {
+  return demoDataEnabled() ? <AuditReportDemo page={page} /> : <RealAuditReport page={page} />;
+}
+
+function AuditReportDemo({ page }: { page: string }) {
   return (
     <section className="sheet" id="audit">
       <ReportHeader subtitle="Audit trail extract · EV-1042" />

@@ -1,0 +1,23 @@
+RigMind
+
+Copyright (c) 2026 Satyaki Solutions Private Limited. All rights reserved.
+
+This software and its documentation (the "Software") are the proprietary property of Satyaki Solutions Private Limited ("Satyaki Solutions"). The Software is licensed, not sold.
+
+1. Grant. Satyaki Solutions grants you a non-exclusive, non-transferable licence to install and use the Software for your internal business operations, within the scope of the licence you have been issued (for example the number of camera streams or sites).
+
+2. Restrictions. You may not copy, modify, translate, reverse engineer, decompile or disassemble the Software, create derivative works from it, sublicense, rent, lease or distribute it, or remove any proprietary notice, except to the extent applicable law permits despite this restriction.
+
+3. Third-party components. The Software includes third-party components (for example GStreamer, SQLite, nlohmann/json, Microsoft WebView2 and the Microsoft Visual C++ runtime) that are licensed to you under their own terms. Those terms apply to those components only.
+
+4. Ownership. Satyaki Solutions and its licensors keep all right, title and interest in the Software, including all intellectual property rights.
+
+5. Safety notice. The Software supports, and does not replace, rig safety procedures, trained personnel and certified safety systems. Alerts and summaries are decision support only.
+
+6. No warranty. The Software is provided "as is", without warranty of any kind, to the extent permitted by applicable law.
+
+7. Limitation of liability. To the extent permitted by applicable law, Satyaki Solutions is not liable for indirect, incidental or consequential damages arising from the use of the Software.
+
+8. Termination. This licence ends automatically if you break its terms. On termination you must stop using the Software and delete all copies.
+
+For licensing enquiries contact Satyaki Solutions Private Limited.

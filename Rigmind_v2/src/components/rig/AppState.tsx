@@ -4,6 +4,12 @@ import { readDevice, writeDevice } from "@/lib/device-db";
 import { alerts, type Alert } from "@/data/mock";
 import { isNative, nativeCall } from "@/lib/native-bridge";
 import { installUiAudit } from "@/lib/audit";
+import { demoDataEnabled } from "@/lib/demo-mode";
+import { localOperator } from "@/lib/real-state";
+
+// Sample alerts only when the installer option was ticked; otherwise the list starts empty and fills from the host.
+const seedAlerts = (): Alert[] => (demoDataEnabled() ? alerts : []);
+const operatorName = () => (demoDataEnabled() ? "Faisal A." : localOperator.name);
 const FEED_INTERVAL_MS = 1000;
 
 // One row of the backend alerts.feed: an alert the C++ backend raised, with its current status.
@@ -41,16 +47,17 @@ const Context = createContext<{
   items: Alert[];
   respond: (id: string, status: Alert["status"]) => void;
   reset: () => void;
-}>({ dark: false, toggleTheme: () => {}, items: alerts, respond: () => {}, reset: () => {} });
+}>({ dark: false, toggleTheme: () => {}, items: seedAlerts(), respond: () => {}, reset: () => {} });
 export function AppState({ children }: { children: ReactNode }) {
   const [dark, setDark] = useState(false),
-    [items, setItems] = useState(alerts);
+    [items, setItems] = useState<Alert[]>(seedAlerts);
   useEffect(() => {
     readDevice<{ dark: boolean; items: Alert[] }>("preferences")
       .then((saved) => {
         if (saved) {
           setDark(saved.dark);
-          setItems(saved.items);
+          // Saved rows are the sample set (or a copy of host rows); real alerts always come from the host feed.
+          if (demoDataEnabled()) setItems(saved.items);
         }
       })
       .catch(() => toast.error("Device storage could not be opened"));
@@ -96,11 +103,11 @@ export function AppState({ children }: { children: ReactNode }) {
         items,
         respond: (id, status) => {
           if (isNative())
-            nativeCall("alert.respond", { id, status, owner: "Faisal A." }).catch((e) =>
+            nativeCall("alert.respond", { id, status, owner: operatorName() }).catch((e) =>
               console.warn("alert.respond failed", e),
             );
           setItems((old) => {
-            const next = old.map((a) => (a.id === id ? { ...a, status, owner: "Faisal A." } : a));
+            const next = old.map((a) => (a.id === id ? { ...a, status, owner: operatorName() } : a));
             writeDevice("preferences", { dark, items: next }).catch(() =>
               toast.error("Response could not be saved"),
             );
@@ -108,7 +115,7 @@ export function AppState({ children }: { children: ReactNode }) {
           });
           toast.success(`${id} ${status.toLowerCase()}`);
         },
-        reset: () => setItems(alerts),
+        reset: () => setItems(seedAlerts()),
       }}
     >
       {children}

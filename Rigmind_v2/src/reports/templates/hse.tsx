@@ -10,8 +10,14 @@ import {
   StatusPill,
 } from "../components";
 import { hseCorrectiveActions, hseDecisions } from "@/data/mock";
+import { demoDataEnabled } from "@/lib/demo-mode";
+import { RealHseReport } from "../real-templates";
 
 export function HseReport({ page }: { page: string }) {
+  return demoDataEnabled() ? <HseReportDemo page={page} /> : <RealHseReport page={page} />;
+}
+
+function HseReportDemo({ page }: { page: string }) {
   return (
     <section className="sheet" id="hse">
       <ReportHeader subtitle="HSE review report · 06 Oct 2026" />

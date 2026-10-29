@@ -1,7 +1,13 @@
 import { Checklist, DataTable, MetaStrip, ReportFooter, ReportHeader, SeverityPill, SignatureRow, StatusPill } from "../components";
 import { handoverReport } from "@/data/mock";
+import { demoDataEnabled } from "@/lib/demo-mode";
+import { RealHandoverReport } from "../real-templates";
 
 export function HandoverReport({ page }: { page: string }) {
+  return demoDataEnabled() ? <HandoverReportDemo page={page} /> : <RealHandoverReport page={page} />;
+}
+
+function HandoverReportDemo({ page }: { page: string }) {
   return (
     <section className="sheet" id="handover">
       <ReportHeader subtitle="Shift handover report · Day → Night · 06 Oct" />

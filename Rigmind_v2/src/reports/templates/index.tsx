@@ -32,12 +32,12 @@ export const reportTemplates: Record<string, ReportEntry> = {
   },
   event: {
     name: "Event investigation report",
-    Component: ({ search }) => <EventReport page="01 / 01" eventId={search.eventId ?? "EV-1042"} />,
+    Component: ({ search }) => <EventReport page="01 / 01" eventId={search.eventId} />,
   },
   hse: { name: "HSE review report", Component: () => <HseReport page="01 / 01" /> },
   action: {
     name: "Corrective action report",
-    Component: ({ search }) => <ActionReport page="01 / 01" actionId={search.actionId ?? "CA-028"} />,
+    Component: ({ search }) => <ActionReport page="01 / 01" actionId={search.actionId} />,
   },
   handover: { name: "Shift handover report", Component: () => <HandoverReport page="01 / 01" /> },
   weekly: {

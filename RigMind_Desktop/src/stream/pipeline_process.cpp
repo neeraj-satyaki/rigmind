@@ -2,7 +2,9 @@
 
 #include <stdexcept>
 
-PipelineProcess::PipelineProcess(const std::wstring& exe_path, OnLine on_line) : on_line_(std::move(on_line)) {
+PipelineProcess::PipelineProcess(const std::wstring& exe_path, const std::wstring& data_dir,
+                                 const std::wstring& plugin_path, const std::wstring& models_dir, OnLine on_line)
+    : on_line_(std::move(on_line)) {
     SECURITY_ATTRIBUTES sa{sizeof(sa), nullptr, TRUE};
 
     HANDLE child_stdin = nullptr;
@@ -26,9 +28,9 @@ PipelineProcess::PipelineProcess(const std::wstring& exe_path, OnLine on_line) :
     si.hStdError = nul;
 
     PROCESS_INFORMATION pi{};
-    std::wstring cmdline = L"\"" + exe_path + L"\"";
+    std::wstring cmdline = L"\"" + exe_path + L"\" \"" + data_dir + L"\" \"" + plugin_path + L"\" \"" + models_dir + L"\"";
     const BOOL started = CreateProcessW(exe_path.c_str(), cmdline.data(), nullptr, nullptr, TRUE,
-                                        CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi);
+                                        CREATE_NO_WINDOW, nullptr, data_dir.c_str(), &si, &pi);
 
     CloseHandle(child_stdin);
     CloseHandle(child_stdout);

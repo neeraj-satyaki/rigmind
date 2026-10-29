@@ -19,6 +19,7 @@ import { alerts, severityTone, type Severity } from "@/data/mock";
 import { useAppState } from "@/components/rig/AppState";
 import { NoteDialog } from "@/components/rig/workflow";
 import { cn } from "@/lib/utils";
+import { demoOr } from "@/lib/demo-mode";
 
 export const Route = createFileRoute("/_shell/alerts")({
   head: pageHead("Alert inbox", "Prioritized safety events across your assigned rigs."),
@@ -37,6 +38,11 @@ function Alerts() {
   const [sev, setSev] = useState("All severities");
   const [rig, setRig] = useState("All rigs");
   const [q, setQ] = useState("");
+  // Rig names: the sample fleet, or the rigs that actual alerts came from.
+  const rigOptions = useMemo(
+    () => demoOr(["All rigs", "Demo rig 01", "Demo rig 02", "Demo rig 03", "Demo rig 04"], ["All rigs", ...new Set(items.map((a) => a.rig).filter(Boolean))]),
+    [items],
+  );
   const rows = useMemo(
     () =>
       items.filter(
@@ -105,6 +111,7 @@ function Alerts() {
                   </>
                 ),
               },
+              { id: "monitoring", label: "Monitoring" },
               { id: "acknowledged", label: "Acknowledged" },
               { id: "escalated", label: "Escalated" },
               { id: "all", label: "All alerts" },
@@ -131,7 +138,7 @@ function Alerts() {
             className="w-40"
             value={rig}
             onChange={setRig}
-            options={["All rigs", "Demo rig 01", "Demo rig 02", "Demo rig 03", "Demo rig 04"]}
+            options={rigOptions}
           />
         </div>
         <TableWrap>
@@ -150,6 +157,11 @@ function Alerts() {
                 <td className={td}>
                   <Mono className="font-semibold">{a.id}</Mono>
                   <div className="text-xs text-muted-foreground">{a.rig}</div>
+                  {a.status !== "Open" && (
+                    <Chip tone={a.status === "Escalated" ? "warning" : a.status === "Acknowledged" ? "success" : "neutral"}>
+                      {a.status}
+                    </Chip>
+                  )}
                 </td>
                 <td className={td}>
                   <Chip tone={severityTone(a.severity)}>{a.severity}</Chip>
@@ -166,13 +178,23 @@ function Alerts() {
                 </td>
                 <td className={cn(td, "text-right")}>
                   <div className="flex justify-end gap-1">
-                    <Link to={a.id === "EV-1042" ? "/live" : "/events"}>
-                      <Btn>Review</Btn>
-                    </Link>
-                    {a.status === "Open" && (
+                    {demoOr(a.id === "EV-1042", false) ? (
+                      <Link to="/live">
+                        <Btn>Review</Btn>
+                      </Link>
+                    ) : demoOr(true, false) ? (
+                      <Link to="/events">
+                        <Btn>Review</Btn>
+                      </Link>
+                    ) : (
+                      <Link to="/events/$eventId" params={{ eventId: a.id }}>
+                        <Btn>Review</Btn>
+                      </Link>
+                    )}
+                    {a.status !== "Acknowledged" && (
                       <Btn onClick={() => respond(a.id, "Acknowledged")}>Acknowledge</Btn>
                     )}
-                    {a.status !== "Escalated" && (
+                    {a.status !== "Escalated" && a.status !== "Monitoring" && a.status !== "Cleared" && (
                       <Btn onClick={() => respond(a.id, "Escalated")}>Escalate</Btn>
                     )}
                   </div>
@@ -182,7 +204,7 @@ function Alerts() {
             {rows.length === 0 && (
               <tr>
                 <td colSpan={6} className="p-8 text-center text-muted-foreground">
-                  No alerts match these filters.
+                  {items.length === 0 ? "No alerts yet. Alerts raised by the monitoring service appear here." : "No alerts match these filters."}
                 </td>
               </tr>
             )}

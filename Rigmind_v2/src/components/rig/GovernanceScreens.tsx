@@ -29,7 +29,14 @@ import {
   th,
 } from "./ui";
 import { Check, NoteDialog } from "./workflow";
+import { useCameras } from "@/lib/camera-status";
+import { isNative, nativeCall } from "@/lib/native-bridge";
+import { cameraHealthRows, summarizeCameras } from "@/lib/live-analytics";
+import { demoDataEnabled } from "@/lib/demo-mode";
+import { AUDIT_ACTIONS, auditActionLabel, auditActor, loadAuditEntries } from "@/lib/real-data";
+import { IntegrationsReal, LicenseCapacityReal, SafetyRulesReal, SystemHealthReal } from "./RealGovernance";
 import {
+  cameras as demoCameras,
   services,
   demoPolicy,
   licenseLifecycle,
@@ -40,6 +47,10 @@ import {
 } from "@/data/mock";
 
 export function SafetyRules() {
+  return demoDataEnabled() ? <SafetyRulesDemo /> : <SafetyRulesReal />;
+}
+
+function SafetyRulesDemo() {
   const [tab, setTab] = useState("rules"),
     [form, setForm] = useState({ ...ruleDefaults }),
     [step, setStep] = useState(0),
@@ -226,6 +237,15 @@ export function SafetyRules() {
 }
 
 export function SystemHealth() {
+  return demoDataEnabled() ? <SystemHealthDemo /> : <SystemHealthReal />;
+}
+
+function SystemHealthDemo() {
+  const liveCams = useCameras();
+  const liveSummary = summarizeCameras(
+    liveCams,
+    demoCameras.map((c) => c.id),
+  );
   return (
     <>
       <PageHeader
@@ -305,6 +325,53 @@ export function SystemHealth() {
           </div>
         </Card>
       </div>
+      {isNative() && (
+        <Card className="mt-4">
+          <CardHead
+            title="Live camera streams"
+            sub={`${liveSummary.online} of ${liveSummary.total} online · ${liveSummary.reconnects} reconnects`}
+            right={
+              <Chip tone="success" dot>
+                Live
+              </Chip>
+            }
+          />
+          <TableWrap>
+            <thead>
+              <tr>
+                {["Camera", "Status", "Detail", "Measured"].map((h) => (
+                  <th key={h} className={th}>
+                    {h}
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {cameraHealthRows(
+                demoCameras.map((c) => c.id),
+                liveCams,
+              ).map((r) => (
+                <tr key={r.name}>
+                  <td className={td}>
+                    <Mono>{r.name}</Mono>
+                  </td>
+                  <td className={td}>
+                    <Chip tone={r.tone} dot>
+                      {r.status}
+                    </Chip>
+                  </td>
+                  <td className={td}>{r.seen}</td>
+                  <td className={td}>
+                    {liveCams[r.name]?.state === "online"
+                      ? `${liveCams[r.name]?.fps.toFixed(1)} fps · ${Math.round(liveCams[r.name]?.kbps ?? 0)} kbps`
+                      : "-"}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </TableWrap>
+        </Card>
+      )}
       <div className="mt-4">
         <Callout title="Monitoring coverage is reduced" tone="warning">
           Unavailable cameras must remain visible in fleet summaries. A lost feed is not an
@@ -316,6 +383,10 @@ export function SystemHealth() {
 }
 
 export function LicenseCapacity() {
+  return demoDataEnabled() ? <LicenseCapacityDemo /> : <LicenseCapacityReal />;
+}
+
+function LicenseCapacityDemo() {
   const [file, setFile] = useState("");
   return (
     <>
@@ -420,6 +491,10 @@ export function LicenseCapacity() {
 }
 
 export function Integrations() {
+  return demoDataEnabled() ? <IntegrationsDemo /> : <IntegrationsReal />;
+}
+
+function IntegrationsDemo() {
   const [stage, setStage] = useState(-1),
     [running, setRunning] = useState(false);
   useEffect(() => {
@@ -534,11 +609,55 @@ export function Integrations() {
   );
 }
 
+type AuditRow = { time: string; actor: string; action: string; entity: string; result: string; real?: boolean };
+type HostAuditRow = { id: number; tsMs: number; target: string; detail: string; action?: string; source?: string };
+
+/** Real alarm transitions recorded by the host (audit_log, action alarm.transition). Empty outside the native host. */
+function useAlarmTransitions(): AuditRow[] {
+  const [rows, setRows] = useState<AuditRow[]>([]);
+  const demo = demoDataEnabled();
+  useEffect(() => {
+    if (!isNative()) return;
+    let stopped = false;
+    // Sample off: every real audit action (alarm, alert response, camera, footage and changes made on the pages).
+    const load = () =>
+      (demo
+        ? nativeCall<HostAuditRow[]>("audit.recent", { action: "alarm.transition", limit: 200 })
+        : loadAuditEntries(AUDIT_ACTIONS, 200).then((e) => e.map((x) => ({ id: x.id, tsMs: x.tsMs, target: x.target, detail: x.detail, action: x.action, source: x.source })))
+      )
+        .then((r) => {
+          if (stopped || !Array.isArray(r)) return;
+          setRows(
+            r.map((x) => ({
+              time: new Date(x.tsMs).toLocaleString("en-GB", { day: "2-digit", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false }) + ` #${x.id}`,
+              actor: demo ? "Host (alarm)" : auditActor(x.source ?? ""),
+              action: demo ? "Alarm transition" : auditActionLabel(x.action ?? "alarm.transition"),
+              entity: x.target,
+              result: x.detail,
+              real: true,
+            })),
+          );
+        })
+        .catch(() => {});
+    load();
+    const t = window.setInterval(load, 5000);
+    return () => {
+      stopped = true;
+      window.clearInterval(t);
+    };
+  }, [demo]);
+  return rows;
+}
+
 export function AuditTrail() {
   const [actor, setActor] = useState("All actors"),
     [action, setAction] = useState("All actions"),
     [entity, setEntity] = useState("All entities");
-  const rows = auditLog.filter(
+  const real = useAlarmTransitions();
+  // Recorded alarm transitions come first; the illustrative rows stay below them.
+  const demo = demoDataEnabled();
+  const all: AuditRow[] = demo ? [...real, ...auditLog] : real;
+  const rows = all.filter(
     (r) =>
       (actor === "All actors" || r.actor === actor) &&
       (action === "All actions" || r.action === action) &&
@@ -567,29 +686,29 @@ export function AuditTrail() {
           <Select
             value={entity}
             onChange={setEntity}
-            options={["All entities", ...new Set(auditLog.map((r) => r.entity))]}
+            options={["All entities", ...new Set(all.map((r) => r.entity))]}
           />
         </Field>
         <Field label="Date">
-          <Select options={["06 Oct 2026"]} />
+          <Select options={[demo ? "06 Oct 2026" : "All recorded dates"]} />
         </Field>
         <Field label="Actor">
           <Select
             value={actor}
             onChange={setActor}
-            options={["All actors", ...new Set(auditLog.map((r) => r.actor))]}
+            options={["All actors", ...new Set(all.map((r) => r.actor))]}
           />
         </Field>
         <Field label="Action">
           <Select
             value={action}
             onChange={setAction}
-            options={["All actions", ...new Set(auditLog.map((r) => r.action))]}
+            options={["All actions", ...new Set(all.map((r) => r.action))]}
           />
         </Field>
       </div>
       <Card>
-        <CardHead title="Activity log" sub={`${rows.length} illustrative records`} />
+        <CardHead title="Activity log" sub={demo ? (real.length ? `${real.length} recorded alarm transitions, then illustrative records` : `${rows.length} illustrative records`) : `${real.length} recorded entries, newest first`} />
         <TableWrap>
           <thead>
             <tr>
@@ -602,12 +721,15 @@ export function AuditTrail() {
           </thead>
           <tbody>
             {rows.map((r) => (
-              <tr key={r.time}>
+              <tr key={`${r.real ? "real" : "demo"}-${r.time}-${r.entity}`}>
                 <td className={td}>
                   <Mono>{r.time}</Mono>
                 </td>
                 <td className={td}>{r.actor}</td>
-                <td className={td}>{r.action}</td>
+                <td className={td}>
+                  {r.action}
+                  {r.real && <Chip tone="neutral">Recorded</Chip>}
+                </td>
                 <td className={td}>
                   <Mono>{r.entity}</Mono>
                 </td>
@@ -621,13 +743,13 @@ export function AuditTrail() {
             {!rows.length && (
               <tr>
                 <td colSpan={5} className="p-8 text-center text-muted-foreground">
-                  No activity matches these filters.
+                  {demo || real.length ? "No activity matches these filters." : "No data yet. Audit entries appear here as alarms, alert responses and changes are recorded."}
                 </td>
               </tr>
             )}
           </tbody>
         </TableWrap>
-        <p className="p-4 text-xs text-muted-foreground">06 October 2026 · Asia/Riyadh</p>
+        <p className="p-4 text-xs text-muted-foreground">{demo ? "06 October 2026 · Asia/Riyadh" : "Times are in this computer's local time zone."}</p>
       </Card>
     </>
   );

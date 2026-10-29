@@ -13,6 +13,9 @@ class StreamSink {
 public:
     virtual ~StreamSink() = default;
     virtual void send(const nlohmann::json& command) = 0;
+    // True when describe commands reach a language model. False: the caller keeps the template text and the
+    // audit row says "template".
+    virtual bool can_describe() const { return true; }
 };
 
 // JSON request/reply endpoint behind window.chrome.webview.postMessage.

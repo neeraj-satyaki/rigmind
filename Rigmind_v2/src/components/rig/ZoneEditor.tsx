@@ -15,18 +15,39 @@ import {
   inputCls,
 } from "./ui";
 import { Check } from "./workflow";
+import { demoDataEnabled } from "@/lib/demo-mode";
+import { useRealCameras, useStreamSources } from "@/lib/real-state";
+import { recordChange, useRecord } from "@/lib/real-data";
+
+type SavedZone = { name: string; points: [number, number][] };
 
 export function ZoneEditor() {
-  const [points, setPoints] = useState<[number, number][]>(zoneDefaults.map((p) => [...p])),
+  const demo = demoDataEnabled();
+  // Sample off: zones are drawn by the user per camera, start empty and are kept in the host's records.
+  const zones = useRecord<Record<string, SavedZone>>("zones:v1", {});
+  const realCams = useRealCameras(useStreamSources());
+  const [camId, setCamId] = useState("");
+  const cam = camId || realCams[0]?.id || "";
+  const saved = !demo && cam ? zones.value[cam] : undefined;
+  const base: [number, number][] = demo ? zoneDefaults.map((p) => [...p]) : [];
+  const [points, setPoints] = useState<[number, number][]>(base),
     [selected, setSelected] = useState(0),
     [mode, setMode] = useState("select"),
     [overlay, setOverlay] = useState(true),
     [compare, setCompare] = useState(false),
-    [name, setName] = useState("Derrick exclusion zone");
+    [name, setName] = useState(demo ? "Derrick exclusion zone" : "");
+  const [loadedFor, setLoadedFor] = useState("");
+  if (!demo && zones.loaded && cam && loadedFor !== cam) {
+    // Show the saved geometry of the selected camera once it is known.
+    setLoadedFor(cam);
+    setPoints(saved ? saved.points.map((p) => [...p] as [number, number]) : []);
+    setName(saved?.name ?? "");
+    setSelected(0);
+  }
   const drag = useRef<number | null>(null);
   const svg = useRef<SVGSVGElement>(null);
   const reset = () => {
-    setPoints(zoneDefaults.map((p) => [...p]));
+    setPoints(demo ? zoneDefaults.map((p) => [...p] as [number, number]) : (saved?.points ?? []).map((p) => [...p] as [number, number]));
     setSelected(0);
   };
   const pointAt = (clientX: number, clientY: number): [number, number] => {
@@ -42,16 +63,42 @@ export function ZoneEditor() {
       <PageHeader
         eyebrow="Governance / Geometry"
         title="Zone editor"
-        subtitle="CAM-01 / Derrick board / Demo rig 01"
+        subtitle={demo ? "CAM-01 / Derrick board / Demo rig 01" : cam ? `${cam} / This rig` : "No camera configured"}
         actions={
           <>
             <Btn onClick={reset}>
               <RotateCcw className="size-4" />
               Reset
             </Btn>
+            {!demo && (
+              <Btn
+                disabled={!cam || !saved}
+                onClick={() => {
+                  const { [cam]: _removed, ...rest } = zones.value;
+                  zones.save(rest);
+                  setPoints([]);
+                  setName("");
+                  setSelected(0);
+                  recordChange("rule.draft.save", `zone ${cam}`, "zone deleted");
+                  toast.success("Zone deleted from this device");
+                }}
+              >
+                <Trash2 className="size-4" />
+                Delete zone
+              </Btn>
+            )}
             <Btn
               variant="primary"
-              onClick={() => toast.success("Zone draft saved; approved geometry unchanged")}
+              disabled={!demo && (!cam || points.length < 3)}
+              onClick={() => {
+                if (demo) {
+                  toast.success("Zone draft saved; approved geometry unchanged");
+                  return;
+                }
+                zones.save({ ...zones.value, [cam]: { name: name.trim(), points } });
+                recordChange("rule.draft.save", `zone ${cam}`, `${points.length} vertices`);
+                toast.success("Zone draft saved on this device; detection is unchanged");
+              }}
             >
               <Save className="size-4" />
               Save zone draft
@@ -62,12 +109,18 @@ export function ZoneEditor() {
       <div className="grid gap-4 xl:grid-cols-[1.7fr_1fr]">
         <div>
           <div className="relative aspect-video overflow-hidden rounded-lg bg-slate">
-            <img
-              src={feed}
-              alt="Derrick board simulated camera image"
-              className="h-full w-full object-cover"
-            />
-            {overlay && <DetectionOverlay />}
+            {demo ? (
+              <img
+                src={feed}
+                alt="Derrick board simulated camera image"
+                className="h-full w-full object-cover"
+              />
+            ) : (
+              <div className="flex h-full w-full items-center justify-center bg-slate text-xs text-slate-foreground/70">
+                {cam ? "No still image from the camera. Draw the zone on this blank frame." : "No data yet. Configure a camera first."}
+              </div>
+            )}
+            {demo && overlay && <DetectionOverlay />}
             <svg
               ref={svg}
               viewBox="0 0 100 100"
@@ -93,7 +146,7 @@ export function ZoneEditor() {
             >
               {compare && (
                 <polygon
-                  points={zoneDefaults.map((p) => p.join(",")).join(" ")}
+                  points={(demo ? zoneDefaults : (saved?.points ?? [])).map((p) => p.join(",")).join(" ")}
                   className="fill-deployed/10 stroke-deployed"
                   strokeWidth="0.5"
                   strokeDasharray="2 1"
@@ -185,17 +238,24 @@ export function ZoneEditor() {
                 ? "Choose a point on the image"
                 : "Select a point to adjust the boundary"}
             </span>
-            <span className="absolute bottom-3 right-3 text-[10px] text-slate-foreground">
-              SIMULATED IMAGE
-            </span>
+            {demo && (
+              <span className="absolute bottom-3 right-3 text-[10px] text-slate-foreground">
+                SIMULATED IMAGE
+              </span>
+            )}
           </div>
           <p className="mt-2 font-mono text-xs text-muted-foreground">
-            {points.length} vertices · Draft geometry · CAM-01
+            {points.length} vertices · Draft geometry · {demo ? "CAM-01" : cam || "no camera"}
           </p>
         </div>
         <Card>
           <CardHead title="Zone properties" />
           <div className="space-y-4 p-4">
+            {!demo && (
+              <Field label="Camera">
+                <Select options={realCams.length ? realCams.map((c) => c.id) : ["No camera configured"]} value={cam || "No camera configured"} onChange={(v) => { setCamId(v); setLoadedFor(""); }} />
+              </Field>
+            )}
             <Field label="Zone name">
               <input className={inputCls} value={name} onChange={(e) => setName(e.target.value)} />
             </Field>
@@ -205,22 +265,26 @@ export function ZoneEditor() {
             <Field label="Active during">
               <Select options={["Tubular handling", "All activities"]} />
             </Field>
-            <Check checked={overlay} onChange={setOverlay}>
-              Show detection overlays
-            </Check>
+            {demo && (
+              <Check checked={overlay} onChange={setOverlay}>
+                Show detection overlays
+              </Check>
+            )}
             <Check checked={compare} onChange={setCompare}>
               Compare approved geometry
             </Check>
-            <Btn
-              onClick={() =>
-                toast.success(
-                  "Draft geometry validated against simulated replay; approval still required",
-                )
-              }
-            >
-              <Play className="size-4" />
-              Validate on replay
-            </Btn>
+            {demo && (
+              <Btn
+                onClick={() =>
+                  toast.success(
+                    "Draft geometry validated against simulated replay; approval still required",
+                  )
+                }
+              >
+                <Play className="size-4" />
+                Validate on replay
+              </Btn>
+            )}
           </div>
         </Card>
       </div>

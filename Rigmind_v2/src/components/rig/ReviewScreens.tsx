@@ -23,6 +23,9 @@ import {
   th,
 } from "./ui";
 import { textareaCls } from "./workflow";
+import { isNative, nativeCall } from "@/lib/native-bridge";
+import { demoDataEnabled } from "@/lib/demo-mode";
+import { RealEventHistory, RealEventInvestigation } from "./RealEvents";
 import {
   eventHistory,
   clips,
@@ -131,6 +134,14 @@ function DraftSummary({ eventId, context, sources }: { eventId: string; context:
 }
 
 export function EventHistory() {
+  return demoDataEnabled() ? <DemoEventHistory /> : <RealEventHistory />;
+}
+
+export function EventInvestigation({ eventId }: { eventId: string }) {
+  return demoDataEnabled() ? <DemoEventInvestigation eventId={eventId} /> : <RealEventInvestigation eventId={eventId} />;
+}
+
+function DemoEventHistory() {
   const [severity, setSeverity] = useState("All severities"),
     [review, setReview] = useState("All review statuses");
   const rows = eventHistory.filter(
@@ -255,7 +266,7 @@ export function EventHistory() {
   );
 }
 
-export function EventInvestigation({ eventId }: { eventId: string }) {
+function DemoEventInvestigation({ eventId }: { eventId: string }) {
   const event = eventHistory.find((e) => e.id === eventId);
   const [playing, setPlaying] = useState(false),
     [position, setPosition] = useState(10),
@@ -487,11 +498,90 @@ export function EventInvestigation({ eventId }: { eventId: string }) {
   );
 }
 
+type FootageSet = { id: number; camId: string; timestampMs: number; clipCount: number; path: string; expiresMs: number };
+
+const FOOTAGE_HOST = "https://footage.rigmind.app";
+
+/** One saved alarm: its 10 s segments, played straight from the footage folder. */
+function FootageCard({ set }: { set: FootageSet }) {
+  const [files, setFiles] = useState<string[] | null>(null),
+    [current, setCurrent] = useState(0),
+    [error, setError] = useState("");
+  const open = () => {
+    if (files) return;
+    nativeCall<{ files: string[] }>("footage.files", { path: set.path })
+      .then((r) => setFiles(r.files))
+      .catch((e) => setError(String(e)));
+  };
+  const when = new Date(set.timestampMs).toLocaleString("en-GB", { dateStyle: "medium", timeStyle: "medium" });
+  const left = Math.max(0, Math.ceil((set.expiresMs - Date.now()) / 86_400_000));
+  return (
+    <div className="space-y-2 rounded-lg border border-border bg-card p-3">
+      {files && files.length > 0 ? (
+        <video
+          key={files[current]}
+          src={`${FOOTAGE_HOST}/${set.path}/${files[current]}`}
+          controls
+          autoPlay
+          className="aspect-video w-full rounded bg-slate"
+          onEnded={() => setCurrent((i) => (i + 1 < files.length ? i + 1 : i))}
+        />
+      ) : (
+        <div className="flex aspect-video w-full items-center justify-center rounded bg-slate text-xs text-slate-foreground/70">
+          {error || (files ? "No clip files found on disk" : `${set.clipCount} clip${set.clipCount === 1 ? "" : "s"} saved`)}
+        </div>
+      )}
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div>
+          <Mono>{set.camId}</Mono>
+          <span className="ml-2 text-xs text-muted-foreground">{when}</span>
+          <div className="mt-1 flex gap-2">
+            <Chip tone="critical">Red alarm</Chip>
+            <Chip tone="success" dot>
+              {left} day{left === 1 ? "" : "s"} left
+            </Chip>
+          </div>
+        </div>
+        {!files && (
+          <Btn onClick={open}>
+            <Play className="size-3.5" />
+            Play clip
+          </Btn>
+        )}
+      </div>
+      {files && files.length > 1 && (
+        <div className="flex flex-wrap gap-1">
+          {files.map((f, i) => (
+            <Btn key={f} variant={i === current ? "primary" : "ghost"} className="px-2 text-xs" onClick={() => setCurrent(i)}>
+              Part {i + 1}
+            </Btn>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export function EvidenceLibrary() {
   const [tab, setTab] = useState("clips"),
     [camera, setCamera] = useState("All cameras"),
-    [grid, setGrid] = useState(true);
-  const rows = clips.filter((c) => camera === "All cameras" || c.cam === camera);
+    [grid, setGrid] = useState(true),
+    [sets, setSets] = useState<FootageSet[]>([]),
+    [loaded, setLoaded] = useState(false);
+  const native = isNative();
+  const refresh = (announce = false) =>
+    nativeCall<FootageSet[]>("footage.list", { limit: 200 })
+      .then((r) => {
+        setSets(r);
+        if (announce) toast.success(r.length ? `${r.length} saved clip set${r.length === 1 ? "" : "s"}` : "No footage saved yet");
+      })
+      .catch((e) => announce && toast.error("Footage could not be listed", { description: String(e) }))
+      .finally(() => setLoaded(true));
+  useEffect(() => {
+    if (native) void refresh();
+    else setLoaded(true);
+  }, [native]);
+  const rows = sets.filter((c) => camera === "All cameras" || c.camId === camera);
   return (
     <>
       <PageHeader
@@ -504,7 +594,7 @@ export function EvidenceLibrary() {
               <Grid2X2 className="size-4" />
               {grid ? "List view" : "Grid view"}
             </Btn>
-            <Btn onClick={() => toast.success("3 demonstration clips are ready")}>
+            <Btn onClick={() => (native ? void refresh(true) : toast("Footage is saved by the desktop app"))}>
               <RefreshCw className="size-4" />
               Refresh clips
             </Btn>
@@ -521,53 +611,31 @@ export function EvidenceLibrary() {
         ]}
       />
       <div className="mb-4 flex flex-wrap items-center gap-2">
-        <Select className="w-36" options={["Today"]} />
         <Select
           className="w-40"
-          options={["All cameras", "CAM-01", "CAM-02", "CAM-03"]}
+          options={["All cameras", ...Array.from(new Set(sets.map((c) => c.camId)))]}
           value={camera}
           onChange={setCamera}
         />
-        <Select className="w-40" options={["Ready"]} />
         <span className="ml-auto text-xs text-muted-foreground">
-          {tab === "clips" ? rows.length : 0} illustrative clips
+          {tab === "clips" ? rows.length : 0} saved clip set{rows.length === 1 && tab === "clips" ? "" : "s"}
         </span>
       </div>
       {tab === "clips" ? (
-        <div className={grid ? "grid gap-4 md:grid-cols-2 xl:grid-cols-3" : "grid gap-4"}>
-          {rows.map((c) => (
-            <div key={c.id} className="space-y-2">
-              <CameraTile id={c.cam} area={c.area} overlay={c.id === "EV-1042"}>
-                <span className="absolute bottom-3 right-3 rounded-sm bg-slate px-2 py-1 font-mono text-xs text-slate-foreground">
-                  00:30
-                </span>
-              </CameraTile>
-              <div className="flex flex-wrap items-center justify-between gap-2">
-                <div>
-                  <Mono>{c.id}</Mono>
-                  <span className="ml-2 text-xs text-muted-foreground">{c.time}</span>
-                  <div className="mt-1 flex gap-2">
-                    <Chip tone={severityTone(c.severity)}>{c.severity}</Chip>
-                    <Chip tone="success" dot>
-                      Ready
-                    </Chip>
-                  </div>
-                </div>
-                <Link to="/events/$eventId" params={{ eventId: c.id }}>
-                  <Btn>
-                    <Play className="size-3.5" />
-                    Review clip
-                  </Btn>
-                </Link>
-              </div>
-            </div>
-          ))}
-        </div>
+        rows.length ? (
+          <div className={grid ? "grid gap-4 md:grid-cols-2 xl:grid-cols-3" : "grid gap-4"}>
+            {rows.map((c) => (
+              <FootageCard key={c.id} set={c} />
+            ))}
+          </div>
+        ) : (
+          <div className="py-16 text-center text-muted-foreground">
+            {loaded ? "No footage saved yet. Clips are saved when an alarm reaches Red." : "Loading footage"}
+          </div>
+        )
       ) : (
         <div className="py-16 text-center text-muted-foreground">
-          {tab === "hold"
-            ? "No evidence is on hold."
-            : "No continuous recordings are available in this demonstration."}
+          {tab === "hold" ? "No evidence is on hold." : "No continuous recordings are kept."}
         </div>
       )}
       <div className="mt-6 border-t border-border pt-5">

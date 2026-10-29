@@ -18,8 +18,11 @@ class PipelineProcess : public rigmind::StreamSink {
 public:
     using OnLine = std::function<void(const std::string&)>;
 
-    // Throws std::runtime_error when the child cannot be started.
-    PipelineProcess(const std::wstring& exe_path, OnLine on_line);
+    // data_dir: writable folder for cache\ and footage\ (the install folder is not writable). It is also the child's
+    // working directory. plugin_path: rigmindews module, loaded by the child. Throws std::runtime_error when the
+    // child cannot be started. models_dir: folder with the ONNX models and inference.cfg.
+    PipelineProcess(const std::wstring& exe_path, const std::wstring& data_dir, const std::wstring& plugin_path,
+                    const std::wstring& models_dir, OnLine on_line);
     ~PipelineProcess() override;
 
     PipelineProcess(const PipelineProcess&) = delete;

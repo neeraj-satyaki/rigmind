@@ -1,7 +1,13 @@
 import { DataTable, Kpi, KpiGrid, MetaStrip, ReportFooter, ReportHeader, SignatureRow, StatusPill } from "../components";
 import { pilotCriteria } from "@/data/mock";
+import { demoDataEnabled } from "@/lib/demo-mode";
+import { RealPilotReport } from "../real-templates";
 
 export function PilotReport({ page }: { page: string }) {
+  return demoDataEnabled() ? <PilotReportDemo page={page} /> : <RealPilotReport page={page} />;
+}
+
+function PilotReportDemo({ page }: { page: string }) {
   return (
     <section className="sheet" id="pilot">
       <ReportHeader subtitle="Pilot results report · Demo rig 01" />

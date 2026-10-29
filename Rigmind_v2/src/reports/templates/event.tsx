@@ -1,7 +1,13 @@
 import feed from "@/assets/rig-feed.jpg";
+import { demoDataEnabled } from "@/lib/demo-mode";
+import { RealEventReport } from "../real-templates";
 import { ActionNote, MetaStrip, ReportFooter, ReportHeader, StatusPill, Timeline } from "../components";
 
-export function EventReport({ page, eventId = "EV-1042" }: { page: string; eventId?: string }) {
+export function EventReport({ page, eventId }: { page: string; eventId?: string | undefined }) {
+  return demoDataEnabled() ? <EventReportDemo page={page} eventId={eventId ?? "EV-1042"} /> : <RealEventReport page={page} eventId={eventId} />;
+}
+
+function EventReportDemo({ page, eventId }: { page: string; eventId: string }) {
   return (
     <section className="sheet" id="event">
       <ReportHeader subtitle={`Event investigation report · ${eventId}`} />

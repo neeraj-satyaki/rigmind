@@ -1,5 +1,6 @@
 import { useCallback, useState } from "react";
 import { Link } from "@tanstack/react-router";
+import { demoDataEnabled } from "@/lib/demo-mode";
 import { InfoNote, MetaStrip, ReportFooter, ReportHeader } from "../components";
 import { ActionReport } from "./action";
 import { AuditReport } from "./audit";
@@ -49,16 +50,25 @@ export function PackIndex() {
         <ReportHeader subtitle="Report pack · index" />
         <div className="sheet-body">
           <div>
-            <div className="eyebrow">RigMind report pack · demonstration data</div>
+            <div className="eyebrow">{demoDataEnabled() ? "RigMind report pack · demonstration data" : "RigMind report pack"}</div>
             <h1>Every report the app generates, in one format</h1>
           </div>
           <MetaStrip
-            items={[
-              ["Workspace", "Safety workspace · Enterprise demo"],
-              ["Rigs", "Demo rigs 01–04"],
-              ["Reference day", "Tue 06 Oct 2026"],
-              ["Time zone", "AST (UTC+3)"],
-            ]}
+            items={
+              demoDataEnabled()
+                ? [
+                    ["Workspace", "Safety workspace · Enterprise demo"],
+                    ["Rigs", "Demo rigs 01–04"],
+                    ["Reference day", "Tue 06 Oct 2026"],
+                    ["Time zone", "AST (UTC+3)"],
+                  ]
+                : [
+                    ["Workspace", "Safety workspace"],
+                    ["Rigs", "This rig"],
+                    ["Reference day", new Date().toLocaleDateString("en-GB", { weekday: "short", day: "2-digit", month: "short", year: "numeric" })],
+                    ["Time zone", "Local time of this computer"],
+                  ]
+            }
           />
           <p>
             Each report below is produced from a screen in RigMind. The right-hand column names the

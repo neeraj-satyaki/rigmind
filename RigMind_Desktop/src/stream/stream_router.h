@@ -35,6 +35,9 @@ public:
                                 {"message", "pipeline not running"}}.dump());
     }
 
+    // Describe commands only reach a model when the SLM runs; otherwise the page keeps the template text.
+    bool can_describe() const override { return slm_ != nullptr && slm_->running(); }
+
 private:
     PipelineProcess* pipeline_;
     SlmClient* slm_;

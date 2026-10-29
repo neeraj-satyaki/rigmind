@@ -41,6 +41,36 @@ std::string column_text(sqlite3_stmt* stmt, int col) {
     return text ? reinterpret_cast<const char*>(text) : std::string();
 }
 
+bool has_column(sqlite3* db, const char* table, const char* column) {
+    sqlite3_stmt* stmt = nullptr;
+    const std::string sql = std::string("PRAGMA table_info(") + table + ")";
+    if (sqlite3_prepare_v2(db, sql.c_str(), -1, &stmt, nullptr) != SQLITE_OK) throw std::runtime_error(sqlite3_errmsg(db));
+    bool found = false;
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        if (column_text(stmt, 1) == column) found = true;
+    }
+    sqlite3_finalize(stmt);
+    return found;
+}
+
+// Databases created before episode recording have only (id, timestamp_ms, from_state, to_state).
+// Each new column is added once, guarded by a column check, so old rows keep their data.
+void migrate_alarm_events(sqlite3* db) {
+    struct Column { const char* name; const char* ddl; };
+    static const Column kColumns[] = {
+        {"cam_id", "TEXT NOT NULL DEFAULT ''"},
+        {"alert_id", "TEXT NOT NULL DEFAULT ''"},
+        {"condition", "TEXT NOT NULL DEFAULT ''"},
+        {"place", "TEXT NOT NULL DEFAULT ''"},
+        {"frame", "INTEGER NOT NULL DEFAULT 0"},
+        {"severity", "TEXT NOT NULL DEFAULT ''"},
+    };
+    for (const Column& col : kColumns) {
+        if (has_column(db, "alarm_events", col.name)) continue;
+        exec_or_throw(db, (std::string("ALTER TABLE alarm_events ADD COLUMN \"") + col.name + "\" " + col.ddl).c_str());
+    }
+}
+
 } // namespace
 
 EventStore::EventStore(const std::string& path) {
@@ -85,13 +115,30 @@ EventStore::EventStore(const std::string& path) {
                   "CREATE TABLE IF NOT EXISTS app_records ("
                   " key TEXT PRIMARY KEY,"
                   " value TEXT NOT NULL);");
+    migrate_alarm_events(db_);
 }
 
 EventStore::~EventStore() {
     if (db_) sqlite3_close(db_);
 }
 
-void EventStore::record_transition(AlarmState from, AlarmState to, std::int64_t timestamp_ms) {
+void EventStore::record_transition(AlarmState from, AlarmState to, std::int64_t timestamp_ms, const TransitionDetail* detail) {
+    if (detail) {
+        run(db_,
+            "INSERT INTO alarm_events (timestamp_ms, from_state, to_state, cam_id, alert_id, condition, place, severity) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            [&](sqlite3_stmt* s) {
+                sqlite3_bind_int64(s, 1, timestamp_ms);
+                sqlite3_bind_text(s, 2, to_string(from), -1, SQLITE_STATIC);
+                sqlite3_bind_text(s, 3, to_string(to), -1, SQLITE_STATIC);
+                sqlite3_bind_text(s, 4, detail->cam_id.c_str(), -1, SQLITE_TRANSIENT);
+                sqlite3_bind_text(s, 5, detail->alert_id.c_str(), -1, SQLITE_TRANSIENT);
+                sqlite3_bind_text(s, 6, detail->condition.c_str(), -1, SQLITE_TRANSIENT);
+                sqlite3_bind_text(s, 7, detail->place.c_str(), -1, SQLITE_TRANSIENT);
+                sqlite3_bind_text(s, 8, detail->severity.c_str(), -1, SQLITE_TRANSIENT);
+            });
+        return;
+    }
     run(db_, "INSERT INTO alarm_events (timestamp_ms, from_state, to_state) VALUES (?, ?, ?)",
         [&](sqlite3_stmt* s) {
             sqlite3_bind_int64(s, 1, timestamp_ms);
@@ -100,9 +147,54 @@ void EventStore::record_transition(AlarmState from, AlarmState to, std::int64_t 
         });
 }
 
+std::int64_t EventStore::record_alarm_episode(const AlarmEpisodeRecord& r) {
+    exec_or_throw(db_, "BEGIN IMMEDIATE");
+    try {
+        run(db_,
+            "INSERT INTO alarm_events (timestamp_ms, from_state, to_state, cam_id, alert_id, condition, place, frame, severity) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            [&](sqlite3_stmt* s) {
+                sqlite3_bind_int64(s, 1, r.timestamp_ms);
+                sqlite3_bind_text(s, 2, to_string(r.from), -1, SQLITE_STATIC);
+                sqlite3_bind_text(s, 3, to_string(r.to), -1, SQLITE_STATIC);
+                sqlite3_bind_text(s, 4, r.cam_id.c_str(), -1, SQLITE_TRANSIENT);
+                sqlite3_bind_text(s, 5, r.alert_id.c_str(), -1, SQLITE_TRANSIENT);
+                sqlite3_bind_text(s, 6, r.condition.c_str(), -1, SQLITE_TRANSIENT);
+                sqlite3_bind_text(s, 7, r.place.c_str(), -1, SQLITE_TRANSIENT);
+                sqlite3_bind_int64(s, 8, r.frame);
+                sqlite3_bind_text(s, 9, r.severity.c_str(), -1, SQLITE_TRANSIENT);
+            });
+        const std::int64_t row_id = sqlite3_last_insert_rowid(db_);
+        // Cleared keeps the condition and place of the last escalated state when the event has none.
+        run(db_,
+            "INSERT INTO alerts (id, severity, condition, place, status, raised_ms, updated_ms) VALUES (?, ?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT(id) DO UPDATE SET "
+            " severity = excluded.severity,"
+            " status = excluded.status,"
+            " condition = CASE WHEN excluded.condition = '' THEN alerts.condition ELSE excluded.condition END,"
+            " place = CASE WHEN excluded.place = '' THEN alerts.place ELSE excluded.place END,"
+            " updated_ms = excluded.updated_ms",
+            [&](sqlite3_stmt* s) {
+                sqlite3_bind_text(s, 1, r.alert_id.c_str(), -1, SQLITE_TRANSIENT);
+                sqlite3_bind_text(s, 2, r.severity.c_str(), -1, SQLITE_TRANSIENT);
+                sqlite3_bind_text(s, 3, r.condition.c_str(), -1, SQLITE_TRANSIENT);
+                sqlite3_bind_text(s, 4, r.place.c_str(), -1, SQLITE_TRANSIENT);
+                sqlite3_bind_text(s, 5, r.status.c_str(), -1, SQLITE_TRANSIENT);
+                sqlite3_bind_int64(s, 6, r.timestamp_ms);
+                sqlite3_bind_int64(s, 7, r.timestamp_ms);
+            });
+        exec_or_throw(db_, "COMMIT");
+        return row_id;
+    } catch (...) {
+        sqlite3_exec(db_, "ROLLBACK", nullptr, nullptr, nullptr);
+        throw;
+    }
+}
+
 nlohmann::json EventStore::recent_transitions(int limit) const {
     sqlite3_stmt* stmt = nullptr;
-    const char* sql = "SELECT id, timestamp_ms, from_state, to_state FROM alarm_events ORDER BY id DESC LIMIT ?";
+    const char* sql = "SELECT id, timestamp_ms, from_state, to_state, cam_id, alert_id, condition, place, frame, severity "
+                      "FROM alarm_events ORDER BY id DESC LIMIT ?";
     if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) != SQLITE_OK) {
         throw std::runtime_error(sqlite3_errmsg(db_));
     }
@@ -115,10 +207,33 @@ nlohmann::json EventStore::recent_transitions(int limit) const {
             {"timestampMs", sqlite3_column_int64(stmt, 1)},
             {"from", column_text(stmt, 2)},
             {"to", column_text(stmt, 3)},
+            {"camId", column_text(stmt, 4)},
+            {"alertId", column_text(stmt, 5)},
+            {"condition", column_text(stmt, 6)},
+            {"place", column_text(stmt, 7)},
+            {"frame", sqlite3_column_int64(stmt, 8)},
+            {"severity", column_text(stmt, 9)},
         });
     }
     sqlite3_finalize(stmt);
     return rows;
+}
+
+void EventStore::upsert_alert(const std::string& id, const std::string& severity, const std::string& condition,
+                              const std::string& place, const std::string& status, std::int64_t timestamp_ms) {
+    run(db_,
+        "INSERT INTO alerts (id, severity, condition, place, status, raised_ms, updated_ms) VALUES (?, ?, ?, ?, ?, ?, ?) "
+        "ON CONFLICT(id) DO UPDATE SET severity = excluded.severity, status = excluded.status, condition = excluded.condition,"
+        " place = excluded.place, updated_ms = excluded.updated_ms",
+        [&](sqlite3_stmt* s) {
+            sqlite3_bind_text(s, 1, id.c_str(), -1, SQLITE_TRANSIENT);
+            sqlite3_bind_text(s, 2, severity.c_str(), -1, SQLITE_TRANSIENT);
+            sqlite3_bind_text(s, 3, condition.c_str(), -1, SQLITE_TRANSIENT);
+            sqlite3_bind_text(s, 4, place.c_str(), -1, SQLITE_TRANSIENT);
+            sqlite3_bind_text(s, 5, status.c_str(), -1, SQLITE_TRANSIENT);
+            sqlite3_bind_int64(s, 6, timestamp_ms);
+            sqlite3_bind_int64(s, 7, timestamp_ms);
+        });
 }
 
 void EventStore::raise_alert(const std::string& id, const std::string& severity, const std::string& condition,
@@ -179,8 +294,12 @@ nlohmann::json EventStore::list_alerts() const {
 
 nlohmann::json EventStore::list_raised_alerts(int limit) const {
     sqlite3_stmt* stmt = nullptr;
-    const char* sql = "SELECT id, severity, condition, place, status, owner, raised_ms FROM alerts "
-                      "ORDER BY raised_ms DESC, id DESC LIMIT ?";
+    // A person's response (Acknowledged, Escalated) shows until the alert changes again (escalation or clear).
+    const char* sql = "SELECT a.id, a.severity, a.condition, a.place,"
+                      " CASE WHEN r.id IS NOT NULL AND r.updated_ms >= a.updated_ms THEN r.status ELSE a.status END,"
+                      " CASE WHEN r.id IS NOT NULL THEN r.owner ELSE a.owner END,"
+                      " a.raised_ms, a.updated_ms, a.status FROM alerts a LEFT JOIN alert_responses r ON r.id = a.id "
+                      "ORDER BY a.raised_ms DESC, a.id DESC LIMIT ?";
     if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) != SQLITE_OK) {
         throw std::runtime_error(sqlite3_errmsg(db_));
     }
@@ -195,6 +314,30 @@ nlohmann::json EventStore::list_raised_alerts(int limit) const {
             {"status", column_text(stmt, 4)},
             {"owner", column_text(stmt, 5)},
             {"raisedMs", sqlite3_column_int64(stmt, 6)},
+            {"updatedMs", sqlite3_column_int64(stmt, 7)},
+            {"phase", column_text(stmt, 8)}, // lifecycle (Open | Monitoring | Escalated | Cleared), apart from a person's response
+        });
+    }
+    sqlite3_finalize(stmt);
+    return rows;
+}
+
+nlohmann::json EventStore::recent_audit(const std::string& action, int limit) const {
+    sqlite3_stmt* stmt = nullptr;
+    const char* sql = "SELECT id, ts_ms, source, action, target, detail FROM audit_log WHERE action = ? "
+                      "ORDER BY id DESC LIMIT ?";
+    nlohmann::json rows = nlohmann::json::array();
+    if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) != SQLITE_OK) return rows; // no audit_log table yet
+    sqlite3_bind_text(stmt, 1, action.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int(stmt, 2, limit);
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        rows.push_back({
+            {"id", sqlite3_column_int64(stmt, 0)},
+            {"tsMs", sqlite3_column_int64(stmt, 1)},
+            {"source", column_text(stmt, 2)},
+            {"action", column_text(stmt, 3)},
+            {"target", column_text(stmt, 4)},
+            {"detail", column_text(stmt, 5)},
         });
     }
     sqlite3_finalize(stmt);

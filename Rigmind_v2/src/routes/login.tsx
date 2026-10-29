@@ -9,6 +9,8 @@ import { Btn, Field, inputCls, pageHead } from "@/components/rig/ui";
 import { SatyakiLogo } from "@/components/rig/AppShell";
 import { NoteDialog, Prompt } from "@/components/rig/workflow";
 import { ThemeToggle } from "@/components/rig/NavTools";
+import { PasswordInput } from "@/components/rig/PasswordInput";
+import { demoDataEnabled } from "@/lib/demo-mode";
 import RigMindMark from "@/components/loaders/RigMindMark";
 import {
   DEFAULT_EMAIL,
@@ -97,7 +99,7 @@ function Login() {
             />
           </Field>
           <Field label="Password">
-            <input type="password" className={inputCls} defaultValue="demopassword" />
+            <PasswordInput autoComplete="current-password" defaultValue={demoDataEnabled() ? "demopassword" : ""} />
           </Field>
           <div className="flex items-center justify-between text-[12px]">
             <label className="flex items-center gap-2">

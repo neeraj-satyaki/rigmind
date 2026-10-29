@@ -12,9 +12,15 @@ import {
   SeverityPill,
   StatusPill,
 } from "../components";
+import { demoDataEnabled } from "@/lib/demo-mode";
+import { RealShiftReport } from "../real-templates";
 import { shiftCoverageGaps, shiftCriticalRows, shiftFindings, shiftReport } from "@/data/mock";
 
-export function ShiftReport({ pages: [p1, p2] }: { pages: [string, string] }) {
+export function ShiftReport({ pages }: { pages: [string, string] }) {
+  return demoDataEnabled() ? <ShiftReportDemo pages={pages} /> : <RealShiftReport pages={pages} />;
+}
+
+function ShiftReportDemo({ pages: [p1, p2] }: { pages: [string, string] }) {
   return (
     <>
       <section className="sheet" id="shift">

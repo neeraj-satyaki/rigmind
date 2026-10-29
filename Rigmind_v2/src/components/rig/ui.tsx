@@ -2,6 +2,7 @@ import type { ReactNode, ButtonHTMLAttributes } from "react";
 import { cn } from "@/lib/utils";
 import type { Tone } from "@/data/mock";
 import feed from "@/assets/rig-feed.jpg";
+import { demoDataEnabled } from "@/lib/demo-mode";
 
 export const pageHead = (title: string, description: string) => () => ({
   meta: [
@@ -160,19 +161,34 @@ export function DetectionOverlay({ label = "Person 01 | Zone overlap" }: { label
   );
 }
 
-export function CameraTile({ id, area, overlay, overlayLabel, live, className, children }: { id: string; area: string; overlay?: boolean; overlayLabel?: string | undefined; live?: boolean; className?: string; children?: ReactNode }) {
+export function CameraTile({ id, area, overlay, overlayLabel, live, offline, className, children }: { id: string; area: string; overlay?: boolean; overlayLabel?: string | undefined; live?: boolean; offline?: boolean; className?: string; children?: ReactNode }) {
   return (
     <Card className={cn("overflow-hidden", className)}>
       <div className="flex items-center justify-between gap-2 px-3 py-2 text-xs">
         <div className="flex min-w-0 items-center gap-2"><Mono className="font-semibold">{id}</Mono><span className="truncate text-muted-foreground">{area}</span></div>
-        <span className="whitespace-nowrap text-[11px] text-muted-foreground"><span className="text-success">●</span> {live ? "Live" : "Demo image"}</span>
+        <span className="whitespace-nowrap text-[11px] text-muted-foreground">{offline ? <><span className="text-critical">●</span> Offline</> : <><span className="text-success">●</span> {live ? "Live" : demoDataEnabled() ? "Demo image" : "No stream"}</>}</span>
       </div>
       <div className="relative aspect-video bg-slate">
-        {!live && <img src={feed} alt={`${area} simulated camera feed`} loading="lazy" width={1280} height={720} className="h-full w-full object-cover" />}
-        {overlay && <DetectionOverlay label={overlayLabel} />}
+        {offline ? (
+          <div className="flex h-full w-full flex-col items-center justify-center gap-1 bg-[#3B4350] text-white/80">
+            <span className="text-[11px] font-medium uppercase tracking-[0.14em]">Camera offline</span>
+            <span className="text-[11px] text-white/60">No stream connected</span>
+          </div>
+        ) : (
+          !live &&
+          (demoDataEnabled() ? (
+            <img src={feed} alt={`${area} demo camera image`} loading="lazy" width={1280} height={720} className="h-full w-full object-cover" />
+          ) : (
+            <div className="flex h-full w-full flex-col items-center justify-center gap-1 bg-[#3B4350] text-white/80">
+              <span className="text-[11px] font-medium uppercase tracking-[0.14em]">No stream</span>
+              <span className="text-[11px] text-white/60">Add this camera under Administration / Cameras</span>
+            </div>
+          ))
+        )}
+        {overlay && !offline && <DetectionOverlay label={overlayLabel} />}
         {children}
       </div>
-      <div className="px-3 py-1.5 font-mono text-[11px] text-muted-foreground">{live ? "WebRTC · H.264 · rigmind-pipeline" : "1080p • 25 fps • Simulated feed"}</div>
+      <div className="px-3 py-1.5 font-mono text-[11px] text-muted-foreground">{offline ? "No signal" : live ? "Live" : demoDataEnabled() ? "Demo image" : "No stream"}</div>
     </Card>
   );
 }

@@ -5,7 +5,10 @@ import {
   ReportFooter, ReportHeader, SeriesLegend, StatusPill, TypeBars,
 } from "../components";
 import { availableWeeks, computeWeekly, loadEventLog, weekLabel, type Comparison, type LoggedEvent, type WeeklyStats } from "@/lib/weekly-events";
+import { demoOr } from "@/lib/demo-mode";
 import { loadApprovedSummaries, type StoredSummary } from "@/lib/event-review-store";
+import { loadPlainSummaries, type PlainSummary } from "@/lib/plain-summary";
+import { PlainSummaryTable, chunkPlainSummaries } from "../PlainSummaryTable";
 
 const one = (n: number) => n.toFixed(1).replace(/\.0$/, "");
 const vs = (c: Comparison, unit = "") =>
@@ -20,12 +23,14 @@ const ownPages: PageOf = (i, n) => `${pad2(i + 1)} / ${pad2(n)}`;
 export function WeeklyReport({ week, pageOf = ownPages, onSheets }: { week?: string | undefined; pageOf?: PageOf; onSheets?: (sheets: number) => void }) {
   const [events, setEvents] = useState<LoggedEvent[] | null>(null);
   const [summaries, setSummaries] = useState<StoredSummary[]>([]);
+  const [plain, setPlain] = useState<PlainSummary[]>([]);
   const [error, setError] = useState<string | null>(null);
   const navigate = useNavigate();
   useEffect(() => {
     Promise.all([loadEventLog(), loadApprovedSummaries()])
       .then(([e, s]) => { setEvents(e); setSummaries(s); })
       .catch(() => setError("Stored events could not be read on this device."));
+    loadPlainSummaries().then(setPlain).catch(() => {});
   }, []);
   const weeks = useMemo(() => (events ? availableWeeks(events) : []), [events]);
   const selected = week && weeks.includes(week) ? week : weeks[0];
@@ -34,7 +39,8 @@ export function WeeklyReport({ week, pageOf = ownPages, onSheets }: { week?: str
     () => paginateSummaries(stats ? summaries.filter((s) => stats.ids.has(s.eventId)) : []),
     [stats, summaries],
   );
-  const sheets = 2 + summaryPages.length;
+  const plainPages = useMemo(() => chunkPlainSummaries(plain), [plain]);
+  const sheets = 2 + summaryPages.length + plainPages.length;
   useEffect(() => { onSheets?.(sheets); }, [sheets, onSheets]);
   const p1 = pageOf(0, sheets);
   const p2 = pageOf(1, sheets);
@@ -43,7 +49,7 @@ export function WeeklyReport({ week, pageOf = ownPages, onSheets }: { week?: str
     return (
       <section className="sheet" id="weekly">
         <ReportHeader subtitle="Weekly fleet safety report" />
-        <div className="sheet-body"><p className="muted">{error ?? (events ? "No stored events yet." : "Loading stored events…")}</p></div>
+        <div className="sheet-body"><p className="muted">{error ?? (events ? demoOr("No stored events yet.", "No data for this period. No alerts have been recorded on this device yet.") : "Loading stored events…")}</p></div>
         <ReportFooter page={p1} />
       </section>
     );
@@ -78,7 +84,7 @@ export function WeeklyReport({ week, pageOf = ownPages, onSheets }: { week?: str
               {stats.busiestDay.label} was the busiest day of the week, with {stats.busiestDay.total} events and {stats.busiestDay.critical} critical
             </h1>
           </div>
-          <MetaStrip items={[["Period", stats.period], ["Fleet", "Demo rigs 01–04"], ["Source", "Device event log"], ["Prepared for", "Operations and HSE leads"]]} />
+          <MetaStrip items={[["Period", stats.period], ["Fleet", demoOr("Demo rigs 01–04", "This rig")], ["Source", "Device event log"], ["Prepared for", "Operations and HSE leads"]]} />
           <p>
             RigMind verified <b>{stats.total} events</b> across the fleet this week: {stats.advisory} advisory, {stats.warning} warning
             and {stats.critical} critical.{" "}
@@ -122,7 +128,7 @@ export function WeeklyReport({ week, pageOf = ownPages, onSheets }: { week?: str
             {stats.rigRows.map((r) => (
               <tr key={r.rig}>
                 <td>{r.rig}</td><td>{r.region}</td>
-                <td><StatusPill tone={r.readiness === "Ready" ? "g" : "o"}>{r.readiness}</StatusPill></td>
+                <td>{r.readiness === "—" ? "—" : <StatusPill tone={r.readiness === "Ready" ? "g" : "o"}>{r.readiness}</StatusPill>}</td>
                 <td className="r">{r.critical}</td><td className="r">{r.warning}</td><td className="r">{r.advisory}</td><td className="r">{r.open}</td>
               </tr>
             ))}
@@ -173,6 +179,20 @@ export function WeeklyReport({ week, pageOf = ownPages, onSheets }: { week?: str
             <SummaryBlocks blocks={blocks} />
           </div>
           <ReportFooter page={pageOf(2 + i, sheets)} />
+        </section>
+      ))}
+
+      {plainPages.map((rows, i) => (
+        <section className="sheet" key={`plain-${i}`}>
+          <ReportHeader subtitle={subtitle} />
+          <div className="sheet-body">
+            <div>
+              <div className="eyebrow">Weekly fleet safety report · plain-language alert summaries{i > 0 ? " (continued)" : ""}</div>
+              <h2>What each alert meant, in plain words</h2>
+            </div>
+            <PlainSummaryTable rows={rows} />
+          </div>
+          <ReportFooter page={pageOf(2 + summaryPages.length + i, sheets)} />
         </section>
       ))}
     </>

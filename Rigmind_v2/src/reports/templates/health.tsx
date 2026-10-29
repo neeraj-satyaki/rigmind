@@ -1,9 +1,15 @@
 import { ActionNote, DataTable, Kpi, KpiGrid, MetaStrip, ReportFooter, ReportHeader, StatusPill } from "../components";
 import { services } from "@/data/mock";
+import { demoDataEnabled } from "@/lib/demo-mode";
+import { RealHealthReport } from "../real-templates";
 
 const toneMap: Record<string, "g" | "b" | "r"> = { success: "g", advisory: "b", critical: "r" };
 
 export function HealthReport({ page }: { page: string }) {
+  return demoDataEnabled() ? <HealthReportDemo page={page} /> : <RealHealthReport page={page} />;
+}
+
+function HealthReportDemo({ page }: { page: string }) {
   return (
     <section className="sheet" id="health">
       <ReportHeader subtitle="Monitoring coverage report · 06 Oct 2026" />

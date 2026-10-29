@@ -1,5 +1,7 @@
 import { createFileRoute, useRouter } from "@tanstack/react-router";
 import { ArrowLeft, Download, Printer } from "lucide-react";
+import { toast } from "sonner";
+import { isNative, nativeCall } from "@/lib/native-bridge";
 import { reportTemplates, reportTitles, type ReportSearch } from "@/reports/templates";
 import "@/reports/reports.css";
 
@@ -53,8 +55,21 @@ function ReportViewer() {
             <Download size={15} /> Download CSV
           </button>
         )}
-        <button type="button" className="rm-toolbar__primary" onClick={() => window.print()}>
-          <Printer size={15} /> Print / Save as PDF
+        {isNative() && (
+          <button
+            type="button"
+            className="rm-toolbar__primary"
+            onClick={() =>
+              nativeCall<{ path: string }>("report.savePdf", { name: reportId }, 60_000)
+                .then((r) => toast.success("PDF saved", { description: r.path }))
+                .catch((e) => toast.error("The PDF could not be saved", { description: String(e) }))
+            }
+          >
+            <Download size={15} /> Download PDF
+          </button>
+        )}
+        <button type="button" className={isNative() ? undefined : "rm-toolbar__primary"} onClick={() => window.print()}>
+          <Printer size={15} /> Print
         </button>
       </div>
       <Component search={search} />

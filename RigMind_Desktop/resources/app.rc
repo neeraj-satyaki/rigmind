@@ -12,7 +12,8 @@ BEGIN
   BEGIN
     BLOCK "040904B0"
     BEGIN
-      VALUE "CompanyName", "Satyaki Solutions Pvt Ltd"
+      VALUE "CompanyName", "Satyaki Solutions Private Limited"
+      VALUE "LegalCopyright", "Copyright (c) 2026 Satyaki Solutions Private Limited. All rights reserved."
       VALUE "FileDescription", "RigMind"
       VALUE "ProductName", "RigMind"
       VALUE "FileVersion", "1.0.0.0"

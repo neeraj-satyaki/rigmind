@@ -8,8 +8,14 @@ import {
   Timeline,
 } from "../components";
 import { actionReport } from "@/data/mock";
+import { demoDataEnabled } from "@/lib/demo-mode";
+import { RealActionReport } from "../real-templates";
 
-export function ActionReport({ page, actionId = "CA-028" }: { page: string; actionId?: string }) {
+export function ActionReport({ page, actionId }: { page: string; actionId?: string | undefined }) {
+  return demoDataEnabled() ? <ActionReportDemo page={page} actionId={actionId ?? "CA-028"} /> : <RealActionReport page={page} actionId={actionId} />;
+}
+
+function ActionReportDemo({ page, actionId }: { page: string; actionId: string }) {
   return (
     <section className="sheet" id="action">
       <ReportHeader subtitle={`Corrective action report · ${actionId}`} />

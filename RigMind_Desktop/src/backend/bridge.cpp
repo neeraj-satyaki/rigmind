@@ -111,13 +111,17 @@ json Bridge::simulate(const json& params) {
         if (after == before) continue;
 
         const std::int64_t ts = now_ms();
-        store_.record_transition(before, after, ts);
         const char* severity = after == AlarmState::Red ? "Critical"
                                : after == AlarmState::Orange ? "Warning" : "Advisory";
         const char* condition = after == AlarmState::Red ? "Platform-elevator collision"
                                 : after == AlarmState::Orange ? "Elevator near platform" : "Link-tilt angled";
         const std::string id = "EV-" + std::to_string(next_event_++);
+        const std::string cam_for_row = params.value("cam", std::string());
+        const EventStore::TransitionDetail detail{id, severity, condition, place, cam_for_row};
+        store_.record_transition(before, after, ts, &detail); // the row carries the alert id (joins to alerts.feed)
         store_.raise_alert(id, severity, condition, place, ts);
+        // Same audit row the pipeline path (AlarmRecorder) writes, so every stored transition has one.
+        audit_event("alarm.transition", id, clip(std::string(to_string(before)) + " -> " + to_string(after) + " | " + condition + " | " + place + " | " + cam_for_row, 512));
         alerts.push_back({{"id", id}, {"severity", severity}, {"condition", condition}, {"place", place}});
     }
     if (alarm_.current() != target) throw std::runtime_error("scenario did not reach target state");
@@ -165,8 +169,8 @@ std::string Bridge::handle(const std::string& request_json) {
             // must contain. The chat system message (host and harness) fixes the output format.
             const std::string prompt =
                 "Event: " + facts + "\nWrite one plain sentence for a site supervisor. Name the camera and the place, "
-                "say what happened, and say what must be done. No jargon.";;
-            const bool requested = stream_ != nullptr;
+                "say what happened, and say what must be done. No jargon.";
+            const bool requested = stream_ != nullptr && stream_->can_describe();
             if (requested) {
                 stream_->send({{"cmd", "describe"}, {"alertId", alert_id}, {"prompt", prompt},
                                {"severity", severity}, {"camId", cam}, {"place", place}});
@@ -198,6 +202,10 @@ std::string Bridge::handle(const std::string& request_json) {
                 audit_->record("ui", action, target, detail, e.value("ts", now_ms()));
             }
             result = {{"accepted", entries.size()}};
+        } else if (method == "audit.recent") {
+            // Real audit rows for one action (default alarm.transition), newest first.
+            result = store_.recent_audit(clip(params.value("action", std::string("alarm.transition")), 64),
+                                         std::clamp(params.value("limit", 200), 1, 1000));
         } else if (method == "alarm.simulate") {
             result = simulate(params);
         } else if (method == "alarm.reset") {
@@ -233,13 +241,27 @@ std::string Bridge::handle(const std::string& request_json) {
             // Only RTSP sources; keeps the pipeline from opening files or other schemes.
             if (uri.rfind("rtsp://", 0) != 0) throw std::runtime_error("invalid uri");
             const std::string cam = require_string(params, "cam", 32);
-            stream_->send({{"cmd", "open"}, {"cam", cam}, {"uri", uri}});
+            // Optional camera login. Both blank = a camera without credentials (the "ignore" choice on the Camera page).
+            const std::string user = params.value("user", std::string());
+            const std::string pass = params.value("pass", std::string());
+            if (user.size() > 128 || pass.size() > 128) throw std::runtime_error("invalid credentials");
+            stream_->send({{"cmd", "open"}, {"cam", cam}, {"uri", uri}, {"user", user}, {"pass", pass}});
             audit_event("stream.open", cam, "");
             result = {{"accepted", true}};
         } else if (method == "stream.offer") {
             if (!stream_) throw std::runtime_error("stream pipeline not available");
             stream_->send({{"cmd", "offer"}, {"cam", require_string(params, "cam", 32)},
                            {"sdp", require_string(params, "sdp", 16384)}});
+            result = {{"accepted", true}};
+        } else if (method == "stream.detach") {
+            // The viewer left the Live page. The camera keeps recording and raising alarms.
+            if (!stream_) throw std::runtime_error("stream pipeline not available");
+            stream_->send({{"cmd", "detach"}, {"cam", require_string(params, "cam", 32)}});
+            result = {{"accepted", true}};
+        } else if (method == "stream.status") {
+            // Asks the pipeline to re-send the status of every camera (answered as "status" events).
+            if (!stream_) throw std::runtime_error("stream pipeline not available");
+            stream_->send({{"cmd", "status"}});
             result = {{"accepted", true}};
         } else if (method == "stream.close") {
             if (!stream_) throw std::runtime_error("stream pipeline not available");

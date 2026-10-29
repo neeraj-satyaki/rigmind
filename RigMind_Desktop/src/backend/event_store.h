@@ -25,8 +25,35 @@ public:
     EventStore& operator=(const EventStore&) = delete;
 
     // Alarm transitions
-    void record_transition(AlarmState from, AlarmState to, std::int64_t timestamp_ms);
+    // Optional episode details (alert id, severity, condition, place, camera) are stored on the row when given, so a
+    // transition can be joined to its alert. The scripted alarm.simulate path passes them; alarm.step does not.
+    struct TransitionDetail {
+        std::string alert_id, severity, condition, place, cam_id;
+    };
+    void record_transition(AlarmState from, AlarmState to, std::int64_t timestamp_ms, const TransitionDetail* detail = nullptr);
     nlohmann::json recent_transitions(int limit) const;
+
+    // One EWS episode transition, recorded atomically: an alarm_events row (with camera, alert id, condition,
+    // place, frame, severity) and the single alerts row of the episode, inserted on the first call for the
+    // alert id and updated in place afterwards (severity never lowers within an episode; status is
+    // Monitoring | Escalated | Cleared). Returns the id of the alarm_events row.
+    struct AlarmEpisodeRecord {
+        std::string cam_id;
+        std::string alert_id;
+        AlarmState from = AlarmState::None;
+        AlarmState to = AlarmState::None;
+        std::string severity;  // severity of the alert after this transition (Advisory | Warning | Critical)
+        std::string status;    // Monitoring | Escalated | Cleared
+        std::string condition;
+        std::string place;
+        std::int64_t frame = 0;
+        std::int64_t timestamp_ms = 0;
+    };
+    std::int64_t record_alarm_episode(const AlarmEpisodeRecord& record);
+
+    // Inserts or updates one alerts row by id (severity, condition, place, status); raised_ms stays from the first call.
+    void upsert_alert(const std::string& id, const std::string& severity, const std::string& condition,
+                      const std::string& place, const std::string& status, std::int64_t timestamp_ms);
 
     // Safety alerts (toast, bell and push are presented by the UI from raised rows).
     // list_alerts() returns the stored responses (id, status, owner), which the UI merges into its alert list.
@@ -37,6 +64,10 @@ public:
     nlohmann::json list_alerts() const;
     // Raised alerts with their current status and owner, newest first (the live alert feed).
     nlohmann::json list_raised_alerts(int limit) const;
+
+    // Rows of the audit_log table (written by AuditLog) with this exact action, newest first. Empty when the
+    // table does not exist yet. Rows still in the audit queue are not included.
+    nlohmann::json recent_audit(const std::string& action, int limit) const;
 
     // Alarm footage: one row per saved clip set. Rows and their files expire after 7 days.
     void record_footage(const std::string& cam_id, std::int64_t timestamp_ms, int clip_count, const std::string& path);

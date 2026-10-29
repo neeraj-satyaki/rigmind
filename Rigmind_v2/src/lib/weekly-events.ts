@@ -1,5 +1,8 @@
 import { alerts, eventHistory, eventLogSeed, rigs as rigFixtures } from "@/data/mock";
 import type { Severity } from "@/data/mock";
+import { demoDataEnabled } from "@/lib/demo-mode";
+import { isEventRow, loadAlertFeed, localIso } from "@/lib/real-data";
+import type { LiveAlertRow } from "@/lib/live-analytics";
 
 export type LoggedEvent = {
   id: string;
@@ -122,13 +125,18 @@ export function computeWeekly(all: LoggedEvent[], start: string) {
   const peak = blocks.reduce((a, b) => (b.n > a.n ? b : a), blocks[0]!);
   const quiet = blocks.reduce((a, b) => (b.n < a.n ? b : a), blocks[0]!);
   const night = ev.filter((e) => { const h = Number(e.at.slice(11, 13)); return h >= 18 || h < 6; }).length;
-  const rigRows = rigFixtures.map((r) => {
+  // Sample on: the fixture rigs. Sample off: only the rigs that appear in the stored events.
+  const rigList: { name: string; region: string; status: string }[] = demoDataEnabled()
+    ? rigFixtures.map((r) => ({ name: r.name, region: r.region, status: r.status }))
+    : [...new Set(all.map((e) => e.rig))].map((name) => ({ name, region: "—", status: "—" }));
+  const rigRows = rigList.map((r) => {
     const l = ev.filter((e) => e.rig === r.name);
     return { rig: r.name, region: r.region, readiness: r.status, critical: count(l, "Critical"), warning: count(l, "Warning"), advisory: count(l, "Advisory"), open: l.filter((e) => e.status === "Open").length, total: l.length };
   });
-  const topRig = rigRows.reduce((a, b) => (b.total > a.total ? b : a), rigRows[0]!);
+  const topRig = rigRows.reduce((a, b) => (b.total > a.total ? b : a), rigRows[0] ?? { rig: "—", region: "—", readiness: "—", critical: 0, warning: 0, advisory: 0, open: 0, total: 0 });
   const busiest = byDay[busiestIdx]!;
-  const typeBars = eventLogSeed.types
+  const typeList = demoDataEnabled() ? eventLogSeed.types : [...new Set(busiest.map((e) => e.type))];
+  const typeBars = typeList
     .map((t) => ({ label: t, count: busiest.filter((e) => e.type === t).length }))
     .sort((a, b) => b.count - a.count);
   const dayLabel = (i: number) => fmt(parse(days[i]!), { weekday: "short", day: "2-digit", month: "short" });
@@ -154,8 +162,25 @@ export function computeWeekly(all: LoggedEvent[], start: string) {
 export type WeeklyStats = ReturnType<typeof computeWeekly>;
 
 const KEY = "eventlog:v1";
-/** Events persisted in device SQLite; seeded once from the demo fixture. */
+/** Name of the rig the alerts come from; the host does not report rig names yet. */
+export const LOCAL_RIG = "This rig";
+
+/** Maps alerts the host raised (alerts.feed) to log entries. No acknowledgement time is recorded by the host yet. */
+export function eventsFromAlerts(rows: LiveAlertRow[]): LoggedEvent[] {
+  return rows.filter(isEventRow).map((r) => ({
+    id: r.id,
+    at: localIso(r.raisedMs),
+    rig: LOCAL_RIG,
+    severity: (r.severity === "Critical" || r.severity === "Warning" ? r.severity : "Advisory") as Severity,
+    type: r.condition || "Unspecified",
+    ackSeconds: null,
+    status: (r.phase ?? r.status) === "Cleared" ? "Closed" : "Open",
+  }));
+}
+
+/** Events for the weekly report. Sample on: persisted in device SQLite and seeded once from the demo fixture. Sample off: the host's real alerts. */
 export async function loadEventLog(): Promise<LoggedEvent[]> {
+  if (!demoDataEnabled()) return eventsFromAlerts(await loadAlertFeed(500));
   const { readDevice, writeDevice } = await import("./device-db");
   const existing = await readDevice<LoggedEvent[]>(KEY);
   if (existing) return existing;

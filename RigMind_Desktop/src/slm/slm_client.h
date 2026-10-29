@@ -21,7 +21,8 @@ public:
     SlmClient(const SlmClient&) = delete;
     SlmClient& operator=(const SlmClient&) = delete;
 
-    bool running() const { return process_ != nullptr; }
+    // The server process was started and has not exited.
+    bool running() const { return process_ != nullptr && WaitForSingleObject(process_, 0) == WAIT_TIMEOUT; }
     void describe(const nlohmann::json& command);
 
 private:

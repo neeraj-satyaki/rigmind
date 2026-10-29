@@ -1,0 +1,16 @@
+[
+ {
+  "file": "RigMind-GPU-cudnn-8.9.7-win64.zip",
+  "bytes": 497199923,
+  "sha256": "4C6E586E3B07CBFB980ACD1232DD149BF29A0C83D004A09F2C25056532E82C03",
+  "url": "https://github.com/neeraj-satyaki/rigmind/releases/download/v1.0.1-win64/RigMind-GPU-cudnn-8.9.7-win64.zip",
+  "marker": "cudnn64_8.dll"
+ },
+ {
+  "file": "RigMind-GPU-cuda-11.8-win64.zip",
+  "bytes": 659482728,
+  "sha256": "6C59305250EB93BFA057C3725EA5CC5F00E3F74C6C38CC27A2240762E57D47E6",
+  "url": "https://github.com/neeraj-satyaki/rigmind/releases/download/v1.0.1-win64/RigMind-GPU-cuda-11.8-win64.zip",
+  "marker": "cudart64_110.dll"
+ }
+]

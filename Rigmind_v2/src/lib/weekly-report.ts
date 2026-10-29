@@ -1,6 +1,7 @@
 import type { jsPDF as JsPDF } from "jspdf";
 import { eventHistory, severityTrend, weeklyReportMeta as meta } from "@/data/mock";
 import type { StoredSummary } from "./event-review-store";
+import { demoDataEnabled } from "./demo-mode";
 
 type RGB = [number, number, number];
 const ink: RGB = [23, 33, 49];
@@ -39,6 +40,8 @@ export async function generateWeeklyReport(opts: {
   preparedEmail: string;
   sections: string[];
 }) {
+  // This PDF is composed from the sample fixtures only. Real weekly reports use the printable report (/report/weekly).
+  if (!demoDataEnabled()) throw new Error("The sample-data PDF export is disabled. Use the printable weekly report instead.");
   const { jsPDF } = await import("jspdf");
   const pdf: JsPDF = new jsPDF({ unit: "mm", format: "a4" });
   const W = 210,

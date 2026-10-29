@@ -55,7 +55,7 @@ export function onNativeEvent(listener: (event: NativeEvent) => void): () => voi
 }
 
 /** Calls a C++ bridge method. Rejects when not inside the host, on host error, or on timeout. */
-export function nativeCall<T>(method: string, params: Record<string, unknown> = {}): Promise<T> {
+export function nativeCall<T>(method: string, params: Record<string, unknown> = {}, timeoutMs = CALL_TIMEOUT_MS): Promise<T> {
   const wv = webview();
   if (!wv) return Promise.reject(new Error("native host not available"));
   wire(wv);
@@ -64,7 +64,7 @@ export function nativeCall<T>(method: string, params: Record<string, unknown> = 
     const timer = setTimeout(() => {
       pending.delete(id);
       reject(new Error(`native call timed out: ${method}`));
-    }, CALL_TIMEOUT_MS);
+    }, timeoutMs);
     pending.set(id, {
       resolve: (v) => {
         clearTimeout(timer);

@@ -39,7 +39,7 @@ export const monitoredAreas = [
   { name: "Access corridor", cams: "CAM-06", status: "Ready", tone: "success" as Tone, note: "Monitoring active" },
 ];
 
-export interface Alert { id: string; rig: string; severity: Severity; condition: string; area: string; age: string; owner: string; status: "Open" | "Acknowledged" | "Escalated" }
+export interface Alert { id: string; rig: string; severity: Severity; condition: string; area: string; age: string; owner: string; status: "Open" | "Acknowledged" | "Escalated" | "Monitoring" | "Cleared" }
 export const alerts: Alert[] = [
   { id: "EV-1042", rig: "Demo rig 01", severity: "Critical", condition: "Occupied movement zone", area: "Derrick board", age: "8 s", owner: "Unassigned", status: "Open" },
   { id: "EV-1041", rig: "Demo rig 02", severity: "Critical", condition: "Restricted-zone entry", area: "Drill floor", age: "19 s", owner: "Nasser H.", status: "Open" },

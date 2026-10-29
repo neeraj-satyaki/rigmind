@@ -1,4 +1,6 @@
 import { ALERT_RAISED, LOGO_ALERT_MS } from "@/lib/alert-bus";
+import { startAlarmAlerts } from "@/lib/alarm-alerts";
+import { startPpeAlerts } from "@/lib/ppe-alerts";
 import { Suspense, useEffect, useState, type ReactNode } from "react";
 import { Link, useRouterState } from "@tanstack/react-router";
 import {
@@ -24,7 +26,10 @@ import {
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Avatar } from "./ui";
-import { currentUser } from "@/data/mock";
+import { currentUser as sampleUser } from "@/data/mock";
+import { demoOr } from "@/lib/demo-mode";
+import { localOperator } from "@/lib/real-state";
+import { useAppState } from "./AppState";
 import RigMindMark from "@/components/loaders/RigMindMark";
 import PageLoader, { TopProgress } from "@/components/loaders/PageLoader";
 import { usePageTransition } from "@/hooks/usePageTransition";
@@ -38,7 +43,7 @@ const sections = [
       { to: "/fleet", label: "Fleet overview", icon: LayoutGrid },
       { to: "/rig", label: "Rig workspace", icon: Gauge },
       { to: "/live", label: "Live monitoring", icon: MonitorPlay },
-      { to: "/alerts", label: "Alert inbox", icon: Inbox, badge: 7 },
+      { to: "/alerts", label: "Alert inbox", icon: Inbox, badge: true },
     ],
   },
   {
@@ -104,9 +109,13 @@ function AlertLogo() {
 }
 
 function Sidebar({ onNav }: { onNav: () => void }) {
+  const currentUser = demoOr(sampleUser, localOperator);
   const path = useRouterState({ select: (s) => s.location.pathname });
   const [adminOpen, setAdminOpen] = useState(path.startsWith("/admin"));
   const is = (to: string) => path === to || (to !== "/" && path.startsWith(to + "/"));
+  const { items: alertItems } = useAppState();
+  // Alerts that still need a person: raised and not yet acknowledged or cleared.
+  const openAlerts = alertItems.filter((a) => a.status === "Open" || a.status === "Escalated").length;
   return (
     <div className="flex h-full flex-col gap-4 overflow-y-auto p-3">
       <div className="flex flex-col items-start gap-1">
@@ -124,9 +133,9 @@ function Sidebar({ onNav }: { onNav: () => void }) {
           {s.items.map((i) => (
             <Link key={i.to} to={i.to} onClick={onNav} className={navCls(is(i.to))}>
               <i.icon className="size-4" /> <span className="flex-1">{i.label}</span>
-              {"badge" in i && (
+              {"badge" in i && openAlerts > 0 && (
                 <span className="rounded-full bg-critical px-1.5 text-[10px] font-semibold text-destructive-foreground">
-                  {i.badge}
+                  {openAlerts}
                 </span>
               )}
             </Link>
@@ -192,6 +201,8 @@ export function SatyakiLogo({ caption = false }: { caption?: boolean }) {
 
 export function AppShell({ children }: { children: ReactNode }) {
   const [open, setOpen] = useState(false);
+  useEffect(() => startAlarmAlerts(), []); // EWS alarms -> app alerts on every page
+  useEffect(() => startPpeAlerts(), []); // PPE compliance (not detected) -> Advisory alerts on every page
   const [utcClock, setUtcClock] = useState("");
   const navigating = usePageTransition();
   const path = useRouterState({ select: (s) => s.location.pathname });

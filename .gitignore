@@ -10,3 +10,31 @@ node_modules/
 *.run
 *.tar.gz
 __pycache__/
+third_party/onnxruntime/
+third_party/onnxruntime-gpu/
+third_party/opencv/
+
+# Local build/runtime artefacts that must not be pushed (large binaries, installers, test output)
+RigMind_Desktop/third_party/onnxruntime/
+RigMind_Desktop/third_party/onnxruntime-gpu/
+RigMind_Desktop/third_party/opencv/
+RigMind_Desktop/runtime-windows/
+RigMind_Desktop/release-out/
+RigMind_Desktop/*.zip
+RigMind_Desktop/%SystemDrive%/
+RigMind_Desktop/NVIDIA Corporation/
+Rigmind_v2/NVIDIA Corporation/
+RigMind_Desktop/RigMind-Launch.cmd
+dev/null/
+tests/e2e/results/
+**/tests/e2e/results/
+tests_run/
+**/tests_run/
+RigMind_Desktop/tests/e2e/results/
+RigMind_Desktop/tests/validation/screenshots/
+RigMind_Desktop/tests/validation/reports/
+RigMind_Desktop/tests/validation/perf_validate_raw.json
+RigMind_Desktop/tests/validation/*.jsonl
+*.log
+RigMind_Desktop/tests/cases/test_cases.csv
+RigMind_Desktop/gpu-pack/install-gpu.cmd

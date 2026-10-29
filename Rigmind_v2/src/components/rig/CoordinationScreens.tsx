@@ -33,8 +33,16 @@ import {
   pilotReadiness,
 } from "@/data/mock";
 import { loadApprovedSummaries } from "@/lib/event-review-store";
+import { demoDataEnabled, demoOr } from "@/lib/demo-mode";
+import { ActionsHandoverReal, UsersAccessReal } from "./RealCoordination";
+import { useCameras } from "@/lib/camera-status";
+import { useRealCameras, useStreamSources } from "@/lib/real-state";
 
 export function ActionsHandover() {
+  return demoDataEnabled() ? <ActionsHandoverDemo /> : <ActionsHandoverReal />;
+}
+
+function ActionsHandoverDemo() {
   const [tab, setTab] = useState("actions"),
     [updates, setUpdates] = useState(actionUpdates),
     [note, setNote] = useState(""),
@@ -290,6 +298,10 @@ export function ActionsHandover() {
 }
 
 export function UsersAccess() {
+  return demoDataEnabled() ? <UsersAccessDemo /> : <UsersAccessReal />;
+}
+
+function UsersAccessDemo() {
   const [tab, setTab] = useState("users"),
     [query, setQuery] = useState(""),
     [invite, setInvite] = useState(false),
@@ -481,7 +493,17 @@ export function Reports() {
     loadApprovedSummaries().then((a) => setApprovedCount(a.length)).catch(() => {});
   }, []);
   const selected = reportTypes.find((r) => r.id === type) ?? reportTypes[0];
+  const camStatus = useCameras();
+  const realCams = useRealCameras(useStreamSources());
   if (!selected) return null;
+  const realPilot = [
+    { item: "Camera streams", status: realCams.length ? `${realCams.filter((c) => camStatus[c.id]?.state === "online").length} of ${realCams.length} online` : "No camera configured", tone: "neutral" as const },
+    { item: "Rules & use cases", status: "Not approved", tone: "neutral" as const },
+    { item: "Detection quality", status: "Not measured", tone: "neutral" as const },
+    { item: "Alert latency", status: "Not measured", tone: "neutral" as const },
+    { item: "Alarm interface", status: "No field output connected", tone: "neutral" as const },
+    { item: "Site UAT", status: "Not recorded", tone: "neutral" as const },
+  ];
   return (
     <>
       <PageHeader
@@ -521,10 +543,10 @@ export function Reports() {
             </div>
             <div className="grid gap-3 sm:grid-cols-2">
               <Field label="Scope">
-                <Select options={["All demonstration rigs", "Demo rig 01"]} />
+                <Select options={demoOr(["All demonstration rigs", "Demo rig 01"], ["This rig"])} />
               </Field>
               <Field label="Period">
-                <Select options={type === "weekly" ? [`Week ${weeklyReportMeta.week} · ${weeklyReportMeta.period}`] : ["06 Oct / Day shift"]} />
+                <Select options={demoDataEnabled() ? (type === "weekly" ? [`Week ${weeklyReportMeta.week} · ${weeklyReportMeta.period}`] : ["06 Oct / Day shift"]) : [type === "weekly" ? "Latest week with recorded alerts" : "Today so far"]} />
               </Field>
             </div>
             <div>
@@ -551,7 +573,7 @@ export function Reports() {
                   setBusy(true);
                   setTimeout(() => {
                     setBusy(false);
-                    setSaved([...saved, `${selected.title} · 06 Oct / Day shift`]);
+                    setSaved([...saved, `${selected.title} · ${demoOr("06 Oct / Day shift", "Today so far")}`]);
                     toast.success(`${selected.title} ready`);
                     nav({ to: "/report/$reportId", params: { reportId: type } });
                   }, 600);
@@ -569,7 +591,7 @@ export function Reports() {
             <p className="mb-3 text-sm text-muted-foreground">
               Controlled validation on the selected rig.
             </p>
-            {pilotReadiness.map((p) => (
+            {demoOr(pilotReadiness, realPilot).map((p) => (
               <Row key={p.item} k={p.item} v={<Chip tone={p.tone}>{p.status}</Chip>} />
             ))}
           </div>
