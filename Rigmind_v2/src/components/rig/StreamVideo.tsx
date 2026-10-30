@@ -3,6 +3,7 @@ import RigMindMark from "@/components/loaders/RigMindMark";
 import { LiveDetections } from "@/components/rig/LiveDetections";
 import { useCamera } from "@/lib/camera-status";
 import { nativeCall, onNativeEvent } from "@/lib/native-bridge";
+import { currentOverlayPrefs } from "@/lib/detections";
 
 const GATHER_TIMEOUT_MS = 2000;
 const FRAME_STALL_MS = 6000;
@@ -23,13 +24,13 @@ export function StreamConnecting({ label = "Connecting", detail }: { label?: str
 }
 
 /**
- * Live camera video from the rigmind-pipeline process (RTSP H.264 decoded on the GPU and re-encoded for WebRTC).
+ * Live camera video from the rigmind-pipeline process (`raw`: the incoming picture only, no detection drawn on it) (RTSP H.264 decoded on the GPU and re-encoded for WebRTC).
  * Covers its parent (position relative); the browser decodes, the host does not.
  * The camera state comes from the host: the panel shows "Connecting" until the first frame is playing, and again
  * whenever the camera drops and the host is polling to reconnect. A new WebRTC session is made on every (re)connect.
  * Vanilla ICE: one offer with complete candidates, one answer event back from the host.
  */
-export function StreamVideo({ camId, uri }: { camId: string; uri: string }) {
+export function StreamVideo({ camId, uri, raw = false }: { camId: string; uri: string; raw?: boolean }) {
   const ref = useRef<HTMLVideoElement>(null);
   const camera = useCamera(camId);
   const [playing, setPlaying] = useState(false);
@@ -40,6 +41,16 @@ export function StreamVideo({ camId, uri }: { camId: string; uri: string }) {
   useEffect(() => {
     nativeCall("stream.open", { cam: camId, uri }).catch((e) => console.warn("stream.open failed", camId, e));
   }, [camId, uri]);
+
+  // Raw: the camera picture as it comes in, with no PPE/IDSS boxes drawn into the video (Connect a camera). The saved overlay
+  // choice is put back when the raw view goes away.
+  useEffect(() => {
+    if (!raw) return;
+    nativeCall("stream.overlay", { cam: camId, ppe: false, idss: false }).catch((e) => console.warn("raw view not applied", e));
+    return () => {
+      nativeCall("stream.overlay", { cam: camId, ...currentOverlayPrefs() }).catch(() => {});
+    };
+  }, [raw, camId]);
 
   // One WebRTC session per (re)connect of the camera.
   useEffect(() => {
@@ -126,7 +137,7 @@ export function StreamVideo({ camId, uri }: { camId: string; uri: string }) {
   return (
     <>
       <video ref={ref} autoPlay muted playsInline className="absolute inset-0 h-full w-full bg-black object-contain" />
-      {playing && state === "online" && <LiveDetections camId={camId} video={ref} />}
+      {playing && state === "online" && !raw && <LiveDetections camId={camId} video={ref} />}
       {overlay}
     </>
   );

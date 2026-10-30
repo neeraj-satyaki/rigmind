@@ -81,6 +81,17 @@ public:
     // Clip folders live under this root as <cam_id>/<stamp>. Paths are validated against it before any delete.
     void set_footage_root(const std::string& root);
 
+    // Local accounts (never returned to the page): username is lower case and unique; salt and hash are hex.
+    struct UserRow {
+        std::string username, display_name, salt_hex, hash_hex, role;
+        std::uint32_t iterations = 0;
+        std::int64_t created_ms = 0, last_login_ms = 0;
+    };
+    bool has_users() const;
+    void create_user(const UserRow& user);
+    std::optional<UserRow> get_user(const std::string& username) const;
+    void touch_login(const std::string& username, std::int64_t timestamp_ms);
+
     // Key/value records; values are JSON text
     void put_record(const std::string& key, const std::string& json_value);
     std::optional<std::string> get_record(const std::string& key) const;

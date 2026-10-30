@@ -134,6 +134,10 @@ bool handle_report_pdf(const std::string& text) {
     const auto fail = [id](const std::string& why) {
         g_webview->PostWebMessageAsJson(to_wide(nlohmann::json{{"id", id}, {"ok", false}, {"error", why}}.dump()).c_str());
     };
+    if (g_bridge && !g_bridge->authenticated()) {
+        fail("Sign in required.");
+        return true;
+    }
     ComPtr<ICoreWebView2_7> view7;
     ComPtr<ICoreWebView2Environment6> env6;
     if (!g_webview || FAILED(g_webview.As(&view7)) || !g_env || FAILED(g_env.As(&env6))) {
@@ -382,7 +386,7 @@ void record_clip_line(const std::string& line) {
                                         {"method", "footage.record"},
                                         {"params", {{"cam", event.at("cam")}, {"stamp", event.at("stamp")}, {"count", event.at("count")},
                                                     {"kind", kind == "snapshot" ? "image" : "video"}}}};
-        g_bridge->handle(request.dump());
+        g_bridge->handle_trusted(request.dump());
     } catch (const std::exception&) {
         // Malformed clip line: the page still receives it; no footage row.
     }
@@ -506,6 +510,10 @@ bool handle_mcp_message(const std::string& text) {
     }
     const std::string method = request.is_object() ? request.value("method", std::string()) : std::string();
     if (method != "mcp.status" && method != "mcp.set") return false;
+    if (g_bridge && !g_bridge->authenticated()) {
+        g_webview->PostWebMessageAsJson(to_wide(nlohmann::json{{"id", request.value("id", 0)}, {"ok", false}, {"error", "Sign in required."}}.dump()).c_str());
+        return true;
+    }
     nlohmann::json result;
     if (method == "mcp.set" && request.contains("params") && request["params"].is_object() && request["params"].contains("enabled") && request["params"]["enabled"].is_boolean()) {
         const bool on = request["params"]["enabled"].get<bool>();
@@ -553,6 +561,7 @@ void init_backend() {
     }
     g_router = std::make_unique<StreamRouter>(g_pipeline.get(), g_slm.get(), post_line);
     g_bridge = std::make_unique<rigmind::Bridge>(*g_store, g_router.get(), g_audit.get());
+    g_bridge->set_auth_required(true); // the page cannot reach the host's data or the cameras before an account has signed in
     start_mcp(db_path);
 }
 
@@ -692,12 +701,13 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam) 
         // A finished alarm clip becomes a footage row. This runs on the UI thread, where the bridge may be called.
         if (g_bridge && (line->find("\"clip\"") != std::string::npos || line->find("\"snapshot\"") != std::string::npos)) record_clip_line(*line);
         notify_from_line(*line);
-        if (g_webview) g_webview->PostWebMessageAsJson(to_wide(*line).c_str());
+        // Host events (alarms, detections, answers) go to the page only while an account is signed in.
+        if (g_webview && g_bridge && g_bridge->authenticated()) g_webview->PostWebMessageAsJson(to_wide(*line).c_str());
         return 0;
     }
     case WM_APP_MCP: {
         std::unique_ptr<std::string> request(reinterpret_cast<std::string*>(lparam));
-        if (g_bridge) g_bridge->handle(*request); // an MCP summary request: audited like the "Plain words" button
+        if (g_bridge) g_bridge->handle_trusted(*request); // an MCP summary request: audited like the "Plain words" button
         return 0;
     }
     case WM_APP_TRAY:

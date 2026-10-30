@@ -1,3 +1,4 @@
+import { formatRate } from "@/lib/format-rate";
 import { useState } from "react";
 import { Link } from "@tanstack/react-router";
 import {
@@ -325,7 +326,7 @@ export function EventOverview() {
             value={`${cams.online} of ${cams.total}`}
             note={
               <>
-                <LiveChip /> {cams.online ? `${cams.avgFps.toFixed(1)} fps avg · ${Math.round(cams.totalKbps)} kbps` : "No stream online"}
+                <LiveChip /> {cams.online ? `${cams.avgFps.toFixed(1)} fps avg · ${formatRate(cams.totalKbps)}` : "No stream online"}
                 {" · "}
                 {cams.reconnects} reconnects
                 {cams.online > 0 && ` · up ${formatDuration(cams.longestOnlineSec)}`}
@@ -342,7 +343,7 @@ export function EventOverview() {
             value={`${cams.online} of ${cams.total}`}
             note={
               <>
-                <LiveChip /> {cams.online ? `${cams.avgFps.toFixed(1)} fps avg · ${Math.round(cams.totalKbps)} kbps` : "No stream online"}
+                <LiveChip /> {cams.online ? `${cams.avgFps.toFixed(1)} fps avg · ${formatRate(cams.totalKbps)}` : "No stream online"}
                 {" · "}
                 {cams.reconnects} reconnects
                 {cams.availability !== null && ` · ${(cams.availability * 100).toFixed(1)}% available`}

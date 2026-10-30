@@ -44,7 +44,7 @@ std::string require_string(const json& p, const char* key, std::size_t max_len) 
 } // namespace
 
 Bridge::Bridge(EventStore& store, StreamSink* stream, AuditLog* audit)
-    : store_(store), stream_(stream), audit_(audit) {}
+    : store_(store), stream_(stream), audit_(audit), auth_(store, audit) {}
 
 void Bridge::audit_event(const std::string& action, const std::string& target, const std::string& detail) {
     if (audit_) audit_->record("backend", action, target, detail, now_ms());
@@ -137,13 +137,30 @@ json Bridge::simulate(const json& params) {
     return {{"state", to_string(alarm_.current())}, {"alerts", alerts}, {"clipRequested", clip_requested}};
 }
 
-std::string Bridge::handle(const std::string& request_json) {
+bool Bridge::authenticated() const {
+    return !auth_required_ || (session_ && session_->expires_ms > now_ms());
+}
+
+// What the sign-in page itself needs before anyone is signed in: the sign-in calls, the app version, and the saved theme.
+bool Bridge::allowed_before_sign_in(const std::string& method, const json& params) {
+    if (method == "auth.status" || method == "auth.setup" || method == "auth.login" || method == "app.version") return true;
+    if ((method == "records.get" || method == "records.set") && params.is_object() && params.value("key", std::string()) == "preferences") return true;
+    return false;
+}
+
+void Bridge::start_session(const json& user) {
+    session_ = Session{user.value("username", std::string()), user.value("role", std::string()), now_ms() + kSessionMs};
+}
+
+std::string Bridge::handle_impl(const std::string& request_json, bool trusted) {
     json id;
     try {
         const json req = json::parse(request_json);
         id = req.value("id", json(nullptr));
         const std::string method = req.at("method").get<std::string>();
         const json params = req.value("params", json::object());
+        // Sign-in is enforced here, in the host: a page that skips its own login screen still gets nothing from the bridge.
+        if (!trusted && auth_required_ && !authenticated() && !allowed_before_sign_in(method, params)) throw std::runtime_error("Sign in required.");
 
         json result;
         if (method == "app.version") {
@@ -155,6 +172,20 @@ std::string Bridge::handle(const std::string& request_json) {
             const AlarmState after = alarm_.step(facts_from_json(params));
             if (after != before) store_.record_transition(before, after, now_ms());
             result = {{"state", to_string(after)}, {"changed", after != before}};
+        // Local sign-in (see auth_service.h). Passwords arrive here only to be hashed or checked; they are never stored or logged.
+        } else if (method == "auth.status") {
+            result = auth_.status();
+        } else if (method == "auth.setup") {
+            result = auth_.setup(require_string(params, "username", 64), require_string(params, "password", 128), now_ms());
+            start_session(result);
+        } else if (method == "auth.login") {
+            session_.reset(); // a new sign-in attempt starts from signed out
+            result = auth_.login(require_string(params, "username", 64), require_string(params, "password", 128), now_ms());
+            start_session(result);
+        } else if (method == "auth.logout") {
+            audit_event("auth.logout", session_ ? session_->username : std::string(), "signed out");
+            session_.reset();
+            result = {{"ok", true}};
         } else if (method == "event.describe") {
             // Metadata -> plain language. Returns the fallback text now; the SLM text arrives later as a
             // "description" event, keyed by alertId.
@@ -261,6 +292,15 @@ std::string Bridge::handle(const std::string& request_json) {
             // The viewer left the Live page. The camera keeps recording and raising alarms.
             if (!stream_) throw std::runtime_error("stream pipeline not available");
             stream_->send({{"cmd", "detach"}, {"cam", require_string(params, "cam", 32)}});
+            result = {{"accepted", true}};
+        } else if (method == "stream.overlay") {
+            // Which models are burned into the live video: {cam, ppe, idss}. Both false = the camera picture as it comes in
+            // (Connect a camera preview). The pipeline applies it to the viewer's video at once.
+            if (!stream_) throw std::runtime_error("stream pipeline not available");
+            if (!params.contains("ppe") || !params["ppe"].is_boolean() || !params.contains("idss") || !params["idss"].is_boolean())
+                throw std::runtime_error("ppe and idss must be true or false");
+            stream_->send({{"cmd", "overlay"}, {"cam", require_string(params, "cam", 32)},
+                           {"ppe", params["ppe"].get<bool>()}, {"idss", params["idss"].get<bool>()}});
             result = {{"accepted", true}};
         } else if (method == "stream.status") {
             // Asks the pipeline to re-send the status of every camera (answered as "status" events).

@@ -6,6 +6,7 @@ import { Activity, RefreshCw, Save } from "lucide-react";
 import { toast } from "sonner";
 import { Btn, Callout, Card, CardHead, Chip, Field, Kpi, Mono, PageHeader, Row, Select, TableWrap, Tabs, inputCls, td, th } from "./ui";
 import { useCameras } from "@/lib/camera-status";
+import { formatRate } from "@/lib/format-rate";
 import { isNative, nativeCall } from "@/lib/native-bridge";
 import { cameraHealthRows, summarizeCameras } from "@/lib/live-analytics";
 import { localOperator, useRealCameras, useStreamSources } from "@/lib/real-state";
@@ -67,7 +68,7 @@ export function SystemHealthReal() {
           note={sum.total ? (sum.total - sum.online ? `${sum.total - sum.online} not online` : "All online") : "No camera configured"}
           {...(sum.total && sum.online < sum.total ? { noteTone: "critical" as const } : {})}
         />
-        <Kpi label="Average frame rate" value={sum.online ? sum.avgFps.toFixed(1) : "—"} note={sum.online ? `${Math.round(sum.totalKbps)} kbps total` : "No stream online"} />
+        <Kpi label="Average frame rate" value={sum.online ? sum.avgFps.toFixed(1) : "—"} note={sum.online ? `${formatRate(sum.totalKbps)} total` : "No stream online"} />
         <Kpi label="Reconnects" value={String(sum.reconnects)} note="Since the app started" />
         <Kpi
           label="Saved alarm evidence"
@@ -100,7 +101,7 @@ export function SystemHealthReal() {
                     </Chip>
                   </td>
                   <td className={td}>{status[r.name] ? r.seen : "No report from the host yet"}</td>
-                  <td className={td}>{status[r.name]?.state === "online" ? `${status[r.name]?.fps.toFixed(1)} fps · ${Math.round(status[r.name]?.kbps ?? 0)} kbps` : "-"}</td>
+                  <td className={td}>{status[r.name]?.state === "online" ? `${status[r.name]?.fps.toFixed(1)} fps · ${formatRate(status[r.name]?.kbps ?? 0)}` : "-"}</td>
                 </tr>
               ))}
               {!rows.length && (

@@ -87,8 +87,8 @@ export const Route = createRootRouteWithContext<{ queryClient: QueryClient }>()(
       { name: "description", content: "Rig safety operations workspace." },
     ],
     scripts: [
-      // Before the first paint: apply the saved theme so the boot splash and the app start in the right colours.
-      { children: "try{if(localStorage.getItem('rm-theme')==='dark')document.documentElement.classList.add('dark')}catch(e){}" },
+      // Before the first paint: dark unless the user saved light, so the boot splash and the app start in the right colours.
+      { children: "try{if(localStorage.getItem('rm-theme')!=='light')document.documentElement.classList.add('dark')}catch(e){document.documentElement.classList.add('dark')}" },
     ],
     links: [
       { rel: "preconnect", href: "https://fonts.googleapis.com" },

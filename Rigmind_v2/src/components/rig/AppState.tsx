@@ -5,11 +5,11 @@ import { alerts, type Alert } from "@/data/mock";
 import { isNative, nativeCall } from "@/lib/native-bridge";
 import { installUiAudit } from "@/lib/audit";
 import { demoDataEnabled } from "@/lib/demo-mode";
-import { localOperator } from "@/lib/real-state";
+import { currentOperator } from "@/lib/auth";
 
 // Sample alerts only when the installer option was ticked; otherwise the list starts empty and fills from the host.
 const seedAlerts = (): Alert[] => (demoDataEnabled() ? alerts : []);
-const operatorName = () => (demoDataEnabled() ? "Faisal A." : localOperator.name);
+const operatorName = () => (demoDataEnabled() ? "Faisal A." : currentOperator().name);
 const FEED_INTERVAL_MS = 1000;
 
 // One row of the backend alerts.feed: an alert the C++ backend raised, with its current status.
@@ -47,9 +47,10 @@ const Context = createContext<{
   items: Alert[];
   respond: (id: string, status: Alert["status"]) => void;
   reset: () => void;
-}>({ dark: false, toggleTheme: () => {}, items: seedAlerts(), respond: () => {}, reset: () => {} });
+}>({ dark: true, toggleTheme: () => {}, items: seedAlerts(), respond: () => {}, reset: () => {} });
 export function AppState({ children }: { children: ReactNode }) {
-  const [dark, setDark] = useState(false),
+  // Dark is the default theme; a saved choice (preferences) overrides it, and "Reset settings" returns to it.
+  const [dark, setDark] = useState(true),
     [items, setItems] = useState<Alert[]>(seedAlerts);
   useEffect(() => {
     readDevice<{ dark: boolean; items: Alert[] }>("preferences")

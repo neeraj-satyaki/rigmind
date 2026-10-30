@@ -1,5 +1,6 @@
 // Printable reports with sample data off. Every figure is computed from the host's alerts, camera status, audit log and
 // the records the user saved. Where nothing was recorded the report says so; no sample incident is ever shown.
+import { formatRate } from "@/lib/format-rate";
 import { useEffect, useState, type ReactNode } from "react";
 import {
   ActionNote, DataTable, Findings, GroupedBarChart, InfoNote, Kpi, KpiGrid, MetaStrip, ReportFooter, ReportHeader,
@@ -398,7 +399,7 @@ export function RealHealthReport({ page }: { page: string }) {
                 <td className="mono">{c.id}</td>
                 <td><StatusPill tone={c.st?.state === "online" ? "g" : c.st?.state === "connecting" ? "y" : "r"}>{c.st ? c.st.state : "no report"}</StatusPill></td>
                 <td>{c.st ? stamp(c.st.changedAt) : "—"}</td>
-                <td>{c.st?.reason || (c.st?.state === "online" ? `${c.st.fps.toFixed(1)} fps · ${Math.round(c.st.kbps)} kbps` : "—")}</td>
+                <td>{c.st?.reason || (c.st?.state === "online" ? `${c.st.fps.toFixed(1)} fps · ${formatRate(c.st.kbps)}` : "—")}</td>
               </tr>
             ))}
           </DataTable>

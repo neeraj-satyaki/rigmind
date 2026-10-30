@@ -14,7 +14,8 @@ import { alerts as mockAlerts, cameras as mockCameras, currentUser as sampleUser
 import { demoDataEnabled, demoOr } from "@/lib/demo-mode";
 import { DEFAULT_EMAIL } from "@/lib/profile";
 import { RotateCcw } from "lucide-react";
-import { localOperator, useRealCameras, useStreamSources } from "@/lib/real-state";
+import { useRealCameras, useStreamSources } from "@/lib/real-state";
+import { currentOperator, signOut } from "@/lib/auth";
 import { isNative, nativeCall } from "@/lib/native-bridge";
 import { describeAlert } from "@/lib/plain-summary";
 
@@ -327,7 +328,7 @@ export function Notifications() {
   );
 }
 export function UserMenu() {
-  const currentUser = demoOr(sampleUser, localOperator);
+  const currentUser = demoOr(sampleUser, currentOperator());
   const [profile, setProfile] = useState(false);
   const email = useProfileEmail();
   const [editing, setEditing] = useState(false),
@@ -347,18 +348,19 @@ export function UserMenu() {
   };
   const nav = useNavigate();
   const { reset, dark, toggleTheme } = useAppState();
-  /** Device settings back to their defaults: light theme, alert sounds on, no work email. Saved data (zones, rules, cameras) is not touched. */
+  /** Device settings back to their defaults: dark theme, alert sounds on, no work email. Saved data (zones, rules, cameras) is not touched. */
   const resetSettings = async () => {
     try {
-      if (dark) toggleTheme();
+      if (!dark) toggleTheme();
       setAlertMuted(false);
       await saveProfileEmail(DEFAULT_EMAIL);
-      toast.success("Settings reset to defaults", { description: "Light theme, alert sounds on, work email cleared." });
+      toast.success("Settings reset to defaults", { description: "Dark theme, alert sounds on, work email cleared." });
     } catch {
       toast.error("Could not reset the settings on this device");
     }
   };
   const logout = () => {
+    signOut(); // the account is signed out in the host's audit trail and the page forgets it
     reset();
     nav({ to: "/login" });
     toast.success(demoDataEnabled() ? "Signed out of the demonstration workspace" : "Signed out");

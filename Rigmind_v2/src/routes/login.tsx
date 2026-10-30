@@ -11,6 +11,8 @@ import { NoteDialog, Prompt } from "@/components/rig/workflow";
 import { ThemeToggle } from "@/components/rig/NavTools";
 import { PasswordInput } from "@/components/rig/PasswordInput";
 import { demoDataEnabled } from "@/lib/demo-mode";
+import { NativeLogin } from "@/components/rig/NativeLogin";
+import { authRequired } from "@/lib/auth";
 import RigMindMark from "@/components/loaders/RigMindMark";
 import {
   DEFAULT_EMAIL,
@@ -72,6 +74,9 @@ function Login() {
         </span>
       </header>
       <main className="flex flex-1 items-center justify-center px-6 py-8">
+        {authRequired() ? (
+          <NativeLogin onDone={go} />
+        ) : (
         <form
           onSubmit={(e) => {
             e.preventDefault();
@@ -115,6 +120,7 @@ function Login() {
             Your access is limited to assigned rigs and roles.
           </p>
         </form>
+        )}
       </main>
 
       <Prompt

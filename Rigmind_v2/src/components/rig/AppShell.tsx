@@ -28,7 +28,7 @@ import { cn } from "@/lib/utils";
 import { Avatar } from "./ui";
 import { currentUser as sampleUser } from "@/data/mock";
 import { demoOr } from "@/lib/demo-mode";
-import { localOperator } from "@/lib/real-state";
+import { currentOperator } from "@/lib/auth";
 import { useAppState } from "./AppState";
 import RigMindMark from "@/components/loaders/RigMindMark";
 import PageLoader, { TopProgress } from "@/components/loaders/PageLoader";
@@ -109,7 +109,7 @@ function AlertLogo() {
 }
 
 function Sidebar({ onNav }: { onNav: () => void }) {
-  const currentUser = demoOr(sampleUser, localOperator);
+  const currentUser = demoOr(sampleUser, currentOperator());
   const path = useRouterState({ select: (s) => s.location.pathname });
   const [adminOpen, setAdminOpen] = useState(path.startsWith("/admin"));
   const is = (to: string) => path === to || (to !== "/" && path.startsWith(to + "/"));

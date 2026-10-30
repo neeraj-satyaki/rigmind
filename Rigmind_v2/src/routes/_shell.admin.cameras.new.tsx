@@ -207,7 +207,7 @@ function NewCamera() {
                   </Chip>
                 }
               />
-              <Row k="Resolution" v={valid && live?.width ? `${live.width} × ${live.height}` : "Awaiting validation"} />
+              <Row k="Resolution" v={valid && live?.width ? `${live.width} × ${live.height} (preview scaled to 1280 × 720)` : "Awaiting validation"} />
               <Row k="Stream rate" v={valid && live?.streamFps ? `${Math.round(live.streamFps)} fps` : "Awaiting validation"} />
               {problem && <p className="text-xs text-critical">{problem}</p>}
               <Btn onClick={test}>{valid ? "Revalidate stream" : "Run stream validation"}</Btn>
@@ -289,7 +289,7 @@ function NewCamera() {
         </Card>
         <div className="space-y-4">
           <CameraTile id={cameraId} area={area} overlay={demo && step === 2 && !previewUri} live={!!previewUri}>
-            {previewUri && <StreamVideo camId={cameraId} uri={previewUri} />}
+            {previewUri && <StreamVideo raw camId={cameraId} uri={previewUri} />}
           </CameraTile>
           <Card>
             <CardHead title="Validation results" />

@@ -5,10 +5,21 @@ import { readDevice, writeDevice } from "@/lib/device-db";
 import { DEFAULT_STREAM_SOURCES } from "@/lib/default-sources";
 import { isNative, nativeCall } from "@/lib/native-bridge";
 import { useCameras } from "@/lib/camera-status";
+import { currentOperator } from "@/lib/auth";
 import type { Severity } from "@/data/mock";
 
-/** The person using this device. The host has no accounts yet, so this is a neutral label, never a sample name. */
-export const localOperator = { name: "Operator", role: "This device", initials: "OP" };
+/** The person using this device: the signed-in account (lib/auth.ts), else a neutral label, never a sample name. */
+export const localOperator = {
+  get name() {
+    return currentOperator().name;
+  },
+  get role() {
+    return currentOperator().role;
+  },
+  get initials() {
+    return currentOperator().initials;
+  },
+};
 
 /** camera id -> rtsp URI saved in device storage. With seed, a first run saves and returns the default source. */
 export function useStreamSources(seed = false, enabled = true): Record<string, string> {

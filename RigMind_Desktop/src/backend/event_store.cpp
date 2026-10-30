@@ -119,7 +119,16 @@ EventStore::EventStore(const std::string& path) {
                   " expires_ms INTEGER NOT NULL);"
                   "CREATE TABLE IF NOT EXISTS app_records ("
                   " key TEXT PRIMARY KEY,"
-                  " value TEXT NOT NULL);");
+                  " value TEXT NOT NULL);"
+                  "CREATE TABLE IF NOT EXISTS users ("
+                  " username TEXT PRIMARY KEY,"
+                  " display_name TEXT NOT NULL,"
+                  " salt TEXT NOT NULL,"
+                  " hash TEXT NOT NULL,"
+                  " iterations INTEGER NOT NULL,"
+                  " role TEXT NOT NULL,"
+                  " created_ms INTEGER NOT NULL,"
+                  " last_login_ms INTEGER NOT NULL DEFAULT 0);");
     migrate_alarm_events(db_);
     migrate_footage(db_);
 }
@@ -348,6 +357,55 @@ nlohmann::json EventStore::recent_audit(const std::string& action, int limit) co
     }
     sqlite3_finalize(stmt);
     return rows;
+}
+
+bool EventStore::has_users() const {
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(db_, "SELECT 1 FROM users LIMIT 1", -1, &stmt, nullptr) != SQLITE_OK) throw std::runtime_error(sqlite3_errmsg(db_));
+    const bool any = sqlite3_step(stmt) == SQLITE_ROW;
+    sqlite3_finalize(stmt);
+    return any;
+}
+
+void EventStore::create_user(const UserRow& u) {
+    run(db_, "INSERT INTO users (username, display_name, salt, hash, iterations, role, created_ms) VALUES (?, ?, ?, ?, ?, ?, ?)", [&](sqlite3_stmt* s) {
+        sqlite3_bind_text(s, 1, u.username.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(s, 2, u.display_name.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(s, 3, u.salt_hex.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(s, 4, u.hash_hex.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_int64(s, 5, u.iterations);
+        sqlite3_bind_text(s, 6, u.role.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_int64(s, 7, u.created_ms);
+    });
+}
+
+std::optional<EventStore::UserRow> EventStore::get_user(const std::string& username) const {
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(db_, "SELECT username, display_name, salt, hash, iterations, role, created_ms, last_login_ms FROM users WHERE username = ?", -1, &stmt, nullptr) != SQLITE_OK)
+        throw std::runtime_error(sqlite3_errmsg(db_));
+    sqlite3_bind_text(stmt, 1, username.c_str(), -1, SQLITE_TRANSIENT);
+    std::optional<UserRow> out;
+    if (sqlite3_step(stmt) == SQLITE_ROW) {
+        UserRow u;
+        u.username = column_text(stmt, 0);
+        u.display_name = column_text(stmt, 1);
+        u.salt_hex = column_text(stmt, 2);
+        u.hash_hex = column_text(stmt, 3);
+        u.iterations = static_cast<std::uint32_t>(sqlite3_column_int64(stmt, 4));
+        u.role = column_text(stmt, 5);
+        u.created_ms = sqlite3_column_int64(stmt, 6);
+        u.last_login_ms = sqlite3_column_int64(stmt, 7);
+        out = std::move(u);
+    }
+    sqlite3_finalize(stmt);
+    return out;
+}
+
+void EventStore::touch_login(const std::string& username, std::int64_t timestamp_ms) {
+    run(db_, "UPDATE users SET last_login_ms = ? WHERE username = ?", [&](sqlite3_stmt* s) {
+        sqlite3_bind_int64(s, 1, timestamp_ms);
+        sqlite3_bind_text(s, 2, username.c_str(), -1, SQLITE_TRANSIENT);
+    });
 }
 
 void EventStore::put_record(const std::string& key, const std::string& json_value) {

@@ -29,6 +29,7 @@ import {
   th,
 } from "./ui";
 import { Check, NoteDialog } from "./workflow";
+import { formatRate } from "@/lib/format-rate";
 import { McpCard } from "./McpCard";
 import { useCameras } from "@/lib/camera-status";
 import { isNative, nativeCall } from "@/lib/native-bridge";
@@ -364,7 +365,7 @@ function SystemHealthDemo() {
                   <td className={td}>{r.seen}</td>
                   <td className={td}>
                     {liveCams[r.name]?.state === "online"
-                      ? `${liveCams[r.name]?.fps.toFixed(1)} fps · ${Math.round(liveCams[r.name]?.kbps ?? 0)} kbps`
+                      ? `${liveCams[r.name]?.fps.toFixed(1)} fps · ${formatRate(liveCams[r.name]?.kbps ?? 0)}`
                       : "-"}
                   </td>
                 </tr>

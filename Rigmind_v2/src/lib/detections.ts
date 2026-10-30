@@ -323,6 +323,9 @@ export function setOverlay(model: ModelKey, on: boolean) {
   prefListeners.forEach((l) => l());
 }
 
+/** The saved PPE/IDSS overlay choice, read outside React (to restore it after a raw preview). */
+export const currentOverlayPrefs = (): OverlayPrefs => (prefs ??= loadPrefs());
+
 const prefSnapshot = () => (prefs ??= loadPrefs());
 const SERVER_PREFS: OverlayPrefs = { ppe: true, idss: true };
 const prefServer = () => SERVER_PREFS;

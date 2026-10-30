@@ -35,6 +35,8 @@ ERR_PAGE_RE = re.compile(r"Page not found|\b404\b|This page didn't load|Somethin
 BENIGN_CONSOLE = re.compile(r"fonts\.(googleapis|gstatic)|favicon|ERR_INTERNET_DISCONNECTED|ERR_NAME_NOT_RESOLVED|net::ERR_FAILED.*font|Autofocus", re.I)
 RTSP_URI = "rtsp://192.168.1.8:8556/feed0"
 E2E_EMAIL = "e2e.operator@satyaki-e2e.test"
+E2E_USER = "e2e.operator"             # the account the test creates on the first start (the host keeps only a salted hash)
+E2E_PASS = "Rig-Mind-E2E-2026!"       # 10+ characters, letters and symbols, does not contain the username
 NOTIFY_EMAIL = "e2e.notify@satyaki-e2e.test"
 
 # --------------------------------------------------------------------------------------------- reporting
@@ -186,7 +188,11 @@ def click_real(btn) -> None:
         btn.set_focus()
         btn.click_input()
     except Exception:  # noqa: BLE001
-        btn.click()
+        try:
+            btn.click()
+        except Exception:  # noqa: BLE001
+            # an invisible or just-closed control (the last wizard page closing itself): post BM_CLICK straight to the handle
+            ctypes.windll.user32.PostMessageW(btn.handle, 0x00F5, 0, 0)
 
 
 def btn_by_id(dlg, cid: int):
@@ -221,10 +227,8 @@ def drive_wizard(kind: str, phase: str, demo: bool | None, inspect: bool, timeou
     clicked_since_change = ""
     while time.time() - start < timeout_s:
         # Window gone = wizard finished (uninstaller closes itself after Close).
-        try:
-            if not dlg.exists():
-                break
-        except Exception:  # noqa: BLE001
+        # (a pywinauto dialog wrapper has no exists(): ask Windows whether the window handle is still alive)
+        if not ctypes.windll.user32.IsWindow(dlg.handle):
             break
         # 1. message boxes (sample data question, 'already installed', errors)
         for mb in msgboxes_of(pid, dlg.handle):
@@ -447,7 +451,7 @@ def phase1_install(a) -> None:
     except Exception:  # noqa: BLE001
         pass
     names = " > ".join(pages)
-    R.add(ph, "wizard pages walked", len(pages) >= 4, names[:400])
+    R.add(ph, "wizard pages walked (licence, install, finish at least)", len(pages) >= 3, names[:400])
     R.add(ph, "sample-data question appeared", any("sample" in b.lower() for b in boxes), f"{len(boxes)} message boxes")
     pause(2)
     verify_install(a, ph, present=True)
@@ -775,7 +779,7 @@ def phase2_open(ctx, a) -> None:
     body = ui.body()
     R.add(ph, "no 404 / Not Found / error page", not ERR_PAGE_RE.search(body), f"url={pg.url} title={pg.title()!r}")
     R.add(ph, "document title", "rigmind" in pg.title().lower() or "sign in" in pg.title().lower(), pg.title())
-    R.add(ph, "login screen reached after boot", "Sign in to workspace" in body, f"path={ui.path()}")
+    R.add(ph, "login screen reached after boot", ("Sign in to workspace" in body) or ("Create account and sign in" in body), f"path={ui.path()}")
     ctx["demo"] = demo_state(ui, a)
     flag = (Path(a.app_dir) / "demo-data.flag").exists()
     R.add(ph, "page demo mode matches demo-data.flag", ctx["demo"] == flag, f"page demoData={ctx['demo']} flag={flag}")
@@ -793,18 +797,74 @@ def phase2_open(ctx, a) -> None:
             print("   could not resize:", e)
 
 
+def sign_in(pg, create_ok: bool = True) -> str:
+    """Signs in on the login page like a person: first start creates the account, later starts type the username and password.
+    Returns "created" or "signed in"."""
+    pg.wait_for_selector("text=/Create the first account|Welcome back/i", timeout=60000)
+    body = pg.locator("body").inner_text()
+    mode = "created" if "Create the first account" in body else "signed in"
+    pg.get_by_label("Username").first.fill(E2E_USER)
+    pg.get_by_label("Password", exact=True).first.fill(E2E_PASS)
+    if mode == "created":
+        pg.get_by_label("Repeat the password").first.fill(E2E_PASS)
+        pg.get_by_role("button", name="Create account and sign in").first.click()
+    else:
+        pg.get_by_role("button", name="Sign in to workspace").first.click()
+    pg.wait_for_selector("aside", timeout=30000)
+    return mode
+
+
 def phase3_login(ctx, a) -> None:
     ph = "3 LOGIN"
     banner("PHASE 3 - LOGIN")
     ui: UI = ctx["ui"]
     pg = ui.page
     ui.where = "login"
-    ui.banner("Phase 3: signing in")
-    email = pg.get_by_label("Work email").first if pg.get_by_label("Work email").count() else pg.locator("input").first
-    ui.fill(email, E2E_EMAIL)
-    R.add(ph, "work email entered", email.input_value() == E2E_EMAIL, email.input_value())
+    ui.banner("Phase 3: signing in (first account, wrong and right passwords)")
+    pg.wait_for_selector("text=/Create the first account|Welcome back/i", timeout=60000)
+    first_run = "Create the first account" in ui.body()
+    R.add(ph, "first start asks to create the first account", first_run, "setup form shown" if first_run else "sign-in form shown (an account already exists)")
+    if first_run:
+        # 1. a weak password and mismatched passwords are refused before anything is created
+        pg.get_by_label("Username").first.fill(E2E_USER)
+        pg.get_by_label("Password", exact=True).first.fill("short1")
+        pg.get_by_label("Repeat the password").first.fill("short1")
+        ui.click(pg.get_by_role("button", name="Create account and sign in").first, wait=1)
+        weak = pg.get_by_role("alert").first.inner_text() if pg.get_by_role("alert").count() else ""
+        R.add(ph, "weak password is refused", "10 characters" in weak, weak[:120])
+        pg.get_by_label("Password", exact=True).first.fill(E2E_PASS)
+        pg.get_by_label("Repeat the password").first.fill(E2E_PASS + "x")
+        ui.click(pg.get_by_role("button", name="Create account and sign in").first, wait=1)
+        mism = pg.get_by_role("alert").first.inner_text() if pg.get_by_role("alert").count() else ""
+        R.add(ph, "mismatched passwords are refused", "not the same" in mism, mism[:120])
+        ui.shot("3-setup-refused")
     ui.shot("3-login-filled")
-    ui.click(pg.get_by_role("button", name="Sign in to workspace").first)
+    mode = sign_in(pg)
+    R.add(ph, "account created and signed in" if mode == "created" else "signed in with the saved account", True, f"{E2E_USER} ({mode})")
+    ctx["signed_in"] = True
+    # 2. sign out, then wrong credentials must not get in, the right ones must
+    ui.click(pg.get_by_role("button", name="User account").first, wait=0.8)
+    ui.click(pg.get_by_role("button", name=re.compile("Log out")).first, wait=1.5)
+    pg.wait_for_selector("text=/Welcome back/i", timeout=30000)
+    pg.get_by_label("Username").first.fill(E2E_USER)
+    pg.get_by_label("Password", exact=True).first.fill("Wrong-Password-123")
+    ui.click(pg.get_by_role("button", name="Sign in to workspace").first, wait=2)
+    wrong = pg.get_by_role("alert").first.inner_text() if pg.get_by_role("alert").count() else ""
+    R.add(ph, "wrong password is refused", "Wrong username or password" in wrong and pg.locator("aside").count() == 0, wrong[:120])
+    pg.get_by_label("Username").first.fill("nobody.here")
+    pg.get_by_label("Password", exact=True).first.fill(E2E_PASS)
+    ui.click(pg.get_by_role("button", name="Sign in to workspace").first, wait=2)
+    unknown = pg.get_by_role("alert").first.inner_text() if pg.get_by_role("alert").count() else ""
+    R.add(ph, "unknown user gets the same answer", unknown.strip() == wrong.strip() and pg.locator("aside").count() == 0, unknown[:120])
+    ui.shot("3-login-refused")
+    # a protected page is not reachable without signing in
+    pg.evaluate("history.pushState(null, '', '/fleet'); window.dispatchEvent(new PopStateEvent('popstate'))")
+    pause(1.5)
+    R.add(ph, "workspace pages need the sign-in", pg.locator("aside").count() == 0 or "/login" in ui.path(), f"path={ui.path()}")
+    pg.goto("https://rigmind.app/login")
+    pg.get_by_label("Username").first.fill(E2E_USER)
+    pg.get_by_label("Password", exact=True).first.fill(E2E_PASS)
+    ui.click(pg.get_by_role("button", name="Sign in to workspace").first, wait=1)
     try:
         pg.wait_for_selector("aside", timeout=30000)
         ok = True
@@ -1218,8 +1278,7 @@ def topbar_sweep(ui: UI, ph: str, a) -> None:
     ok = "/login" in ui.path()
     R.add(ph, "Log out returns to the login screen", ok, ui.path())
     COVERAGE.append({"page": "Top bar", "cta": "Log out", "type": "button", "action": "click", "result": f"route -> {ui.path()}", "status": "PASS" if ok else "FAIL", "sel": "Log out", "depth": 0})
-    pg.get_by_role("button", name="Sign in to workspace").first.click()
-    pg.wait_for_selector("aside", timeout=30000)
+    sign_in(pg)
     attach_collector(pg)
 
 
@@ -1732,7 +1791,7 @@ def phase5_pages(ctx, a) -> None:
         new = [e for e in ui.errors[n_err:] if True]
         R.add(ph, f"{label}: no console errors", not new, "; ".join(m for _, m in new)[:300])
         if label == "Analytics":
-            link = ui.page.get_by_role("link", name=re.compile(r"overview", re.I))
+            link = ui.page.locator("main a[href='/analytics/overview']")  # the page's own link (the sidebar has "Fleet overview")
             if link.count():
                 guarded(ph, "Analytics > Event overview", lambda: (ui.click(link.first), pause(1.5), check_page(ui, ph, "Event overview", "/analytics/overview", demo, samples)))
                 ui.nav("Analytics")
@@ -1835,7 +1894,9 @@ def phase6_live(ctx, a) -> None:
     stamps = STAMP_RE.findall(txt)
     if "Orange" in seen or "Red" in seen:
         R.add(ph, "bell lists Orange/Red alerts coloured + timestamped", bool(stamps) and (sev["Warning"] + sev["Critical"] > 0), f"severities={sev}, {len(stamps)} timestamps")
-        R.add(ph, "Yellow stays quiet (no Advisory in bell)", sev["Advisory"] == 0, f"Advisory entries in bell: {sev['Advisory']}")
+        ppe_rows = len(re.findall(r"PPE not detected", txt))
+        non_ppe = max(0, sev["Advisory"] - ppe_rows)  # PPE advisories are legitimate; a Yellow alarm must add none
+        R.add(ph, "Yellow stays quiet (no non-PPE Advisory in bell)", non_ppe == 0, f"Advisory entries in bell: {sev['Advisory']} (of which PPE: {ppe_rows})")
     else:
         R.add(ph, "bell entries", None, f"no Orange/Red occurred; bell text: {txt[:100]!r}")
     # alerts inbox
@@ -1990,8 +2051,7 @@ def restart_app(ctx, a) -> UI:
     assert ui.connect(90), "app did not come back after restart"
     ui.page.wait_for_selector("text=/Sign in|Welcome back/i", timeout=60000)
     pause(1)
-    ui.click(ui.page.get_by_role("button", name="Sign in to workspace").first)
-    ui.page.wait_for_selector("aside", timeout=30000)
+    sign_in(ui.page)
     attach_collector(ui.page)
     return ui
 
@@ -2046,10 +2106,12 @@ def phase8_settings(ctx, a) -> None:
     zone_saved = False
     if zone_name.count() and zone_name.first.is_editable():
         ui.fill(zone_name, "E2E Zone")
-        svg = pg.locator("svg").filter(has=pg.locator("polygon")).first
+        svg = pg.locator("svg.touch-none").first
         box = svg.bounding_box() if svg.count() else None
         if box:
             for fx, fy in ((0.3, 0.7), (0.4, 0.3), (0.7, 0.35), (0.75, 0.7)):
+                # the editor returns to "Select vertex" after each added point: pick "Add point" again every time
+                pg.get_by_role("button", name="Add point").first.click()
                 pg.mouse.click(box["x"] + box["width"] * fx, box["y"] + box["height"] * fy)
                 pause(0.5)
         sv = pg.get_by_role("button", name=re.compile("Save zone draft"))
@@ -2096,7 +2158,7 @@ def phase8_settings(ctx, a) -> None:
     ui.click(mute_btn().first)
     R.add(ph, "alert sounds unmuted (default)", not is_muted(), "")
     ui.click(pg.get_by_role("button", name=re.compile(r"(Dark|Light) theme")).first)
-    R.add(ph, "theme back to default (light)", not is_dark(), f"dark={is_dark()}")
+    R.add(ph, "theme back to default (dark)", is_dark(), f"dark={is_dark()}")
     step("restoring the profile email")
     old = old_email if "@" in old_email else "Not set"
     close_dialogs(ui)

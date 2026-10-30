@@ -23,6 +23,10 @@ export function isNative(): boolean {
   return webview() !== undefined;
 }
 
+/** The host refuses a call when no account is signed in (its session ended); the page then returns to the sign-in screen. */
+export const SIGN_IN_REQUIRED = "Sign in required.";
+export const SIGN_IN_REQUIRED_EVENT = "rigmind:sign-in-required";
+
 function isReply(data: Reply | NativeEvent): data is Reply {
   return typeof (data as Reply).id === "number";
 }
@@ -37,7 +41,10 @@ function wire(wv: WebView2) {
       if (!call) return;
       pending.delete(data.id);
       if (data.ok) call.resolve(data.result);
-      else call.reject(new Error(data.error ?? "native call failed"));
+      else {
+        if (data.error === SIGN_IN_REQUIRED) window.dispatchEvent(new CustomEvent(SIGN_IN_REQUIRED_EVENT));
+        call.reject(new Error(data.error ?? "native call failed"));
+      }
       return;
     }
     listeners.forEach((listener) => listener(data));

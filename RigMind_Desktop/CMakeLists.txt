@@ -10,6 +10,8 @@ add_library(rigmind_backend STATIC
     src/backend/event_store.cpp
     src/backend/bridge.cpp
     src/backend/audit_log.cpp
+    src/backend/password_hash.cpp
+    src/backend/auth_service.cpp
     src/backend/alarm_recorder.cpp
     src/slm/slm_guard.cpp
     src/mcp/mcp_server.cpp
@@ -114,6 +116,12 @@ add_executable(scene_test tests/scene_test.cpp)
 target_include_directories(scene_test PRIVATE ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(scene_test PRIVATE rigmind_backend)
 add_test(NAME scene COMMAND scene_test)
+
+# Local accounts: password hashing and the sign-in service.
+add_executable(auth_test tests/auth_test.cpp)
+target_include_directories(auth_test PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(auth_test PRIVATE rigmind_backend)
+add_test(NAME auth COMMAND auth_test)
 
 # MCP module: protocol, tools, resources and the local HTTP transport.
 if(WIN32)
