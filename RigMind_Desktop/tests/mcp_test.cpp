@@ -75,12 +75,13 @@ static int run() {
     {
         rigmind::EventStore store(db);
         store.set_footage_root((dir / "footage").string());
-        store.upsert_alert("ALM-CAM-01-a1", "Warning", "Elevator near the platform", "Camera CAM-01", "Cleared", now - 60000);
-        store.upsert_alert("ALM-CAM-01-a2", "Critical", "Elevator in the platform danger zone", "Camera CAM-01", "Escalated", now - 1000);
-        store.upsert_alert("PPE-CAM-01-a1", "Advisory", "PPE not detected: vest", "Camera CAM-01", "Open", now - 2000);
+        store.upsert_alert("ALM-CAM-01-a1", "Warning", "Orange alert", "CAM-01", "Cleared", now - 60000);
+        store.put_alert_metadata("ALM-CAM-01-a1", R"({"v":1,"kind":"alarm","camera":"CAM-01","peak":"Orange","cycle":"Y>O>Y","closed":true,"states":[{"state":"Yellow","tsMs":1,"frame":1,"facts":{"link_tilt_angled":true,"angle_deg":28.0}},{"state":"Orange","tsMs":2,"frame":2,"facts":{"elevator_near_platform":true}}]})", now - 60000);
+        store.upsert_alert("ALM-CAM-01-a2", "Critical", "Red alert", "CAM-01", "Escalated", now - 1000);
+        store.upsert_alert("PPE-CAM-01-a1", "Advisory", "PPE items not detected", "CAM-01", "Open", now - 2000);
         store.record_footage("CAM-01", 1000000, 1, "CAM-01/1000000", "video");
         store.record_footage("CAM-01", 2000000, 1, "CAM-01/2000000", "image");
-        store.put_record("plain:ALM-CAM-01-a1", R"({"alertId":"ALM-CAM-01-a1","text":"Camera CAM-01 saw it. Check the area.","source":"slm","at":"2026-10-30T14:00:00Z"})");
+        store.put_alert_summary("ALM-CAM-01-a1", "Camera CAM-01 saw it. Check the area.", "slm", now - 30000);
     }
 
     json live_scene = {{"ev", "scene"}, {"cam", "CAM-01"}, {"ts", now - 500}, {"w", 1280}, {"h", 720},
@@ -122,6 +123,11 @@ static int run() {
     check(payload(tool(server, "list_alerts", {{"status", "Open"}}))["count"] == 1, "status filter");
     json detail = payload(tool(server, "get_alert", {{"alertId", "ALM-CAM-01-a1"}}));
     check(detail["alert"]["severity"] == "Warning" && detail["summary"]["source"] == "slm", "alert detail with its summary");
+    check(detail["summary"]["text"] == "Camera CAM-01 saw it. Check the area." && detail["alert"]["summary"] == detail["summary"]["text"], "summary comes from the host row");
+    check(detail["alert"]["metadata"]["cycle"] == "Y>O>Y" && detail["alert"]["metadata"]["states"][0]["facts"]["angle_deg"] == 28.0, "alert detail carries the facts metadata");
+    check(detail["alert"]["condition"] == "Orange alert" && detail["alert"]["place"] == "CAM-01", "neutral label and camera");
+    check(alerts["alerts"][0]["summary"].is_null() && alerts["alerts"][0]["metadata"].is_null(), "an alert without a summary or metadata says null");
+    check(alerts["alerts"][2]["summary"] == "Camera CAM-01 saw it. Check the area." && alerts["alerts"][2]["metadata"]["kind"] == "alarm" && alerts["alerts"][2]["summarySource"] == "slm", "list_alerts rows carry metadata and summary");
     check(tool(server, "get_alert", {{"alertId", "nope"}})["result"]["isError"] == true, "unknown alert is a tool error");
 
     // live scene
@@ -144,7 +150,7 @@ static int run() {
         check(tool(server, "get_evidence", {{"path", bad}})["result"]["isError"] == true, "path traversal is refused");
 
     // summaries, reports, audit
-    check(payload(tool(server, "list_summaries"))["count"] == 1, "summaries");
+    check(payload(tool(server, "list_summaries"))["count"] == 1 && payload(tool(server, "list_summaries"))["summaries"][0]["alertId"] == "ALM-CAM-01-a1", "summaries");
     json report = payload(tool(server, "report_summary", {{"days", 7}}));
     check(report["alerts"]["total"] == 3 && report["alerts"]["bySeverity"]["Critical"] == 1, "report totals");
     check(report["evidence"]["videoSets"] == 1 && report["evidence"]["imageSets"] == 1 && report["summaries"]["bitnet"] == 1, "report evidence and summaries");
@@ -156,6 +162,7 @@ static int run() {
     json summary = payload(tool(server, "request_summary", {{"alertId", "ALM-CAM-01-a2"}}));
     check(summary["status"] == "done" && summary["source"] == "slm", "summary answered");
     check(asked["camId"] == "CAM-01" && asked["sceneTs"] == now && asked["severity"] == "Critical", "live alert: own camera and scene time");
+    check(!asked.contains("condition") && !asked.contains("place"), "the request carries no page-style wording: the host builds the prompt from the stored metadata");
     tool(server, "request_summary", {{"alertId", "ALM-CAM-01-a1"}});
     check(asked["sceneTs"] == 0 || asked["sceneTs"] == now, "summary request carries a scene time field");
 

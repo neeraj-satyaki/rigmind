@@ -128,7 +128,16 @@ EventStore::EventStore(const std::string& path) {
                   " iterations INTEGER NOT NULL,"
                   " role TEXT NOT NULL,"
                   " created_ms INTEGER NOT NULL,"
-                  " last_login_ms INTEGER NOT NULL DEFAULT 0);");
+                  " last_login_ms INTEGER NOT NULL DEFAULT 0);"
+                  "CREATE TABLE IF NOT EXISTS alert_metadata ("
+                  " alert_id TEXT PRIMARY KEY,"
+                  " json TEXT NOT NULL,"
+                  " updated_ms INTEGER NOT NULL DEFAULT 0);"
+                  "CREATE TABLE IF NOT EXISTS alert_summaries ("
+                  " alert_id TEXT PRIMARY KEY,"
+                  " text TEXT NOT NULL,"
+                  " source TEXT NOT NULL,"
+                  " at_ms INTEGER NOT NULL);");
     migrate_alarm_events(db_);
     migrate_footage(db_);
 }
@@ -190,9 +199,10 @@ std::int64_t EventStore::record_alarm_episode(const AlarmEpisodeRecord& r) {
             " place = CASE WHEN excluded.place = '' THEN alerts.place ELSE excluded.place END,"
             " updated_ms = excluded.updated_ms",
             [&](sqlite3_stmt* s) {
+                const std::string& row_condition = r.alert_condition.empty() ? r.condition : r.alert_condition;
                 sqlite3_bind_text(s, 1, r.alert_id.c_str(), -1, SQLITE_TRANSIENT);
                 sqlite3_bind_text(s, 2, r.severity.c_str(), -1, SQLITE_TRANSIENT);
-                sqlite3_bind_text(s, 3, r.condition.c_str(), -1, SQLITE_TRANSIENT);
+                sqlite3_bind_text(s, 3, row_condition.c_str(), -1, SQLITE_TRANSIENT);
                 sqlite3_bind_text(s, 4, r.place.c_str(), -1, SQLITE_TRANSIENT);
                 sqlite3_bind_text(s, 5, r.status.c_str(), -1, SQLITE_TRANSIENT);
                 sqlite3_bind_int64(s, 6, r.timestamp_ms);
@@ -307,34 +317,105 @@ nlohmann::json EventStore::list_alerts() const {
     return rows;
 }
 
+namespace {
+
+const char* kRaisedSelect =
+    "SELECT a.id, a.severity, a.condition, a.place,"
+    " CASE WHEN r.id IS NOT NULL AND r.updated_ms >= a.updated_ms THEN r.status ELSE a.status END,"
+    " CASE WHEN r.id IS NOT NULL THEN r.owner ELSE a.owner END,"
+    " a.raised_ms, a.updated_ms, a.status, m.json, s.text, s.source, s.at_ms"
+    " FROM alerts a LEFT JOIN alert_responses r ON r.id = a.id"
+    " LEFT JOIN alert_metadata m ON m.alert_id = a.id LEFT JOIN alert_summaries s ON s.alert_id = a.id";
+
+nlohmann::json raised_row(sqlite3_stmt* stmt) {
+    nlohmann::json metadata = nullptr;
+    if (sqlite3_column_type(stmt, 9) != SQLITE_NULL) {
+        metadata = nlohmann::json::parse(column_text(stmt, 9), nullptr, false);
+        if (metadata.is_discarded()) metadata = nullptr;
+    }
+    const bool has_summary = sqlite3_column_type(stmt, 11) != SQLITE_NULL;
+    const std::string text = has_summary ? column_text(stmt, 10) : std::string();
+    return {
+        {"id", column_text(stmt, 0)},
+        {"severity", column_text(stmt, 1)},
+        {"condition", column_text(stmt, 2)},
+        {"place", column_text(stmt, 3)},
+        {"status", column_text(stmt, 4)},
+        {"owner", column_text(stmt, 5)},
+        {"raisedMs", sqlite3_column_int64(stmt, 6)},
+        {"updatedMs", sqlite3_column_int64(stmt, 7)},
+        {"phase", column_text(stmt, 8)}, // lifecycle (Open | Monitoring | Escalated | Cleared), apart from a person's response
+        {"metadata", metadata},
+        {"summary", text.empty() ? nlohmann::json(nullptr) : nlohmann::json(text)},
+        {"summarySource", has_summary ? nlohmann::json(column_text(stmt, 11)) : nlohmann::json(nullptr)},
+        {"summaryAt", has_summary ? nlohmann::json(sqlite3_column_int64(stmt, 12)) : nlohmann::json(nullptr)},
+    };
+}
+
+} // namespace
+
 nlohmann::json EventStore::list_raised_alerts(int limit) const {
     sqlite3_stmt* stmt = nullptr;
     // A person's response (Acknowledged, Escalated) shows until the alert changes again (escalation or clear).
-    const char* sql = "SELECT a.id, a.severity, a.condition, a.place,"
-                      " CASE WHEN r.id IS NOT NULL AND r.updated_ms >= a.updated_ms THEN r.status ELSE a.status END,"
-                      " CASE WHEN r.id IS NOT NULL THEN r.owner ELSE a.owner END,"
-                      " a.raised_ms, a.updated_ms, a.status FROM alerts a LEFT JOIN alert_responses r ON r.id = a.id "
-                      "ORDER BY a.raised_ms DESC, a.id DESC LIMIT ?";
-    if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) != SQLITE_OK) {
+    const std::string sql = std::string(kRaisedSelect) + " ORDER BY a.raised_ms DESC, a.id DESC LIMIT ?";
+    if (sqlite3_prepare_v2(db_, sql.c_str(), -1, &stmt, nullptr) != SQLITE_OK) {
         throw std::runtime_error(sqlite3_errmsg(db_));
     }
     sqlite3_bind_int(stmt, 1, limit);
     nlohmann::json rows = nlohmann::json::array();
-    while (sqlite3_step(stmt) == SQLITE_ROW) {
-        rows.push_back({
-            {"id", column_text(stmt, 0)},
-            {"severity", column_text(stmt, 1)},
-            {"condition", column_text(stmt, 2)},
-            {"place", column_text(stmt, 3)},
-            {"status", column_text(stmt, 4)},
-            {"owner", column_text(stmt, 5)},
-            {"raisedMs", sqlite3_column_int64(stmt, 6)},
-            {"updatedMs", sqlite3_column_int64(stmt, 7)},
-            {"phase", column_text(stmt, 8)}, // lifecycle (Open | Monitoring | Escalated | Cleared), apart from a person's response
-        });
-    }
+    while (sqlite3_step(stmt) == SQLITE_ROW) rows.push_back(raised_row(stmt));
     sqlite3_finalize(stmt);
     return rows;
+}
+
+nlohmann::json EventStore::find_raised_alert(const std::string& id) const {
+    sqlite3_stmt* stmt = nullptr;
+    const std::string sql = std::string(kRaisedSelect) + " WHERE a.id = ?";
+    if (sqlite3_prepare_v2(db_, sql.c_str(), -1, &stmt, nullptr) != SQLITE_OK) throw std::runtime_error(sqlite3_errmsg(db_));
+    sqlite3_bind_text(stmt, 1, id.c_str(), -1, SQLITE_TRANSIENT);
+    nlohmann::json row = nullptr;
+    if (sqlite3_step(stmt) == SQLITE_ROW) row = raised_row(stmt);
+    sqlite3_finalize(stmt);
+    return row;
+}
+
+void EventStore::put_alert_metadata(const std::string& alert_id, const std::string& json_text, std::int64_t timestamp_ms) {
+    run(db_,
+        "INSERT INTO alert_metadata (alert_id, json, updated_ms) VALUES (?, ?, ?) "
+        "ON CONFLICT(alert_id) DO UPDATE SET json = excluded.json, updated_ms = excluded.updated_ms",
+        [&](sqlite3_stmt* s) {
+            sqlite3_bind_text(s, 1, alert_id.c_str(), -1, SQLITE_TRANSIENT);
+            sqlite3_bind_text(s, 2, json_text.c_str(), -1, SQLITE_TRANSIENT);
+            sqlite3_bind_int64(s, 3, timestamp_ms);
+        });
+}
+
+std::optional<std::string> EventStore::get_alert_metadata(const std::string& alert_id) const {
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(db_, "SELECT json FROM alert_metadata WHERE alert_id = ?", -1, &stmt, nullptr) != SQLITE_OK)
+        throw std::runtime_error(sqlite3_errmsg(db_));
+    sqlite3_bind_text(stmt, 1, alert_id.c_str(), -1, SQLITE_TRANSIENT);
+    std::optional<std::string> value;
+    if (sqlite3_step(stmt) == SQLITE_ROW) value = column_text(stmt, 0);
+    sqlite3_finalize(stmt);
+    return value;
+}
+
+void EventStore::put_alert_summary(const std::string& alert_id, const std::string& text, const std::string& source,
+                                   std::int64_t timestamp_ms) {
+    // A failed attempt (empty text) must not wipe a sentence the model wrote earlier.
+    run(db_,
+        "INSERT INTO alert_summaries (alert_id, text, source, at_ms) VALUES (?, ?, ?, ?) "
+        "ON CONFLICT(alert_id) DO UPDATE SET "
+        " text = CASE WHEN excluded.text = '' THEN alert_summaries.text ELSE excluded.text END,"
+        " source = CASE WHEN excluded.text = '' THEN alert_summaries.source ELSE excluded.source END,"
+        " at_ms = CASE WHEN excluded.text = '' THEN alert_summaries.at_ms ELSE excluded.at_ms END",
+        [&](sqlite3_stmt* s) {
+            sqlite3_bind_text(s, 1, alert_id.c_str(), -1, SQLITE_TRANSIENT);
+            sqlite3_bind_text(s, 2, text.c_str(), -1, SQLITE_TRANSIENT);
+            sqlite3_bind_text(s, 3, source.c_str(), -1, SQLITE_TRANSIENT);
+            sqlite3_bind_int64(s, 4, timestamp_ms);
+        });
 }
 
 nlohmann::json EventStore::recent_audit(const std::string& action, int limit) const {

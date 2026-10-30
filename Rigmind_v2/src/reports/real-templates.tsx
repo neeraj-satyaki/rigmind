@@ -1,5 +1,6 @@
 // Printable reports with sample data off. Every figure is computed from the host's alerts, camera status, audit log and
 // the records the user saved. Where nothing was recorded the report says so; no sample incident is ever shown.
+import { alertDescriptionLine } from "@/lib/alert-text";
 import { formatRate } from "@/lib/format-rate";
 import { useEffect, useState, type ReactNode } from "react";
 import {
@@ -130,7 +131,7 @@ export function RealShiftReport({ pages: [p1, p2] }: { pages: [string, string] }
                   <td className="mono">{r.id}</td>
                   <td>{timeText(r.raisedMs)}</td>
                   <td><SeverityPill sev={sev(r.severity)} /></td>
-                  <td>{r.condition}<br /><span className="muted">{r.place}</span></td>
+                  <td>{alertDescriptionLine(r)}</td>
                   <td className="r">—</td>
                   <td><StatusPill tone={statusTone(r.phase ?? r.status)}>{r.status}</StatusPill></td>
                 </tr>
@@ -197,6 +198,7 @@ export function RealEventReport({ page, eventId }: { page: string; eventId?: str
         {data.review && <span className="pill b">{data.review.classification}</span>}
       </div>
       <MetaStrip items={[["Time", a ? stamp(a.raisedMs) : first ? stamp(first.timestampMs) : "—"], ["Location", a?.place || first?.place || "—"], ["Camera", first?.camId || "—"], ["Owner", a?.owner || "Unassigned"]]} />
+      {a && <p style={{ margin: "8px 0" }}><b>Description: </b>{alertDescriptionLine(a)}</p>}
       <div className="evt-grid">
         <div>
           <h3>Recorded sequence</h3>
@@ -468,6 +470,7 @@ export function registerRowsFrom(rows: LiveAlertRow[]) {
     occurred: stamp(r.raisedMs),
     severity: sev(r.severity),
     type: r.condition,
+    description: alertDescriptionLine(r),
     location: r.place,
     review: r.status,
     tone: statusTone(r.phase ?? r.status),
@@ -483,7 +486,7 @@ export function RealRegisterTable({ rows }: { rows: ReturnType<typeof registerRo
           <td>{r.id}</td>
           <td>{r.occurred}</td>
           <td><SeverityPill sev={r.severity} /></td>
-          <td>{r.type}</td>
+          <td>{r.type}<br /><span className="muted">{r.description}</span></td>
           <td>{r.location}</td>
           <td><StatusPill tone={r.tone}>{r.review}</StatusPill></td>
           <td>{r.owner}</td>

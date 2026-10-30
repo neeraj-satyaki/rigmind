@@ -97,7 +97,7 @@ function RealRig() {
               <div key={e.id} className="flex gap-3 px-4 py-3">
                 {e.cleared ? <CheckCircle2 className="size-4 text-success" /> : <AlertTriangle className="size-4 text-critical" />}
                 <div className="flex-1">
-                  <div className="font-medium">{e.condition || "Safety condition"}</div>
+                  <div className="font-medium">{e.condition || e.severity}</div>
                   <div className="text-xs text-muted-foreground">
                     {e.camId} · <Mono>{e.id}</Mono>
                     {e.cleared ? " · cleared" : ""}

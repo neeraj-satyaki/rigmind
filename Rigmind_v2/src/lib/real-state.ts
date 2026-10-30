@@ -80,10 +80,19 @@ const SEV: Record<string, Severity> = {
 const RANK: Record<Severity, number> = { Advisory: 0, Warning: 1, Critical: 2 };
 const sevOf = (t: Transition): Severity => SEV[t.severity.toLowerCase()] ?? SEV[t.to.toLowerCase()] ?? "Advisory";
 
-/** Groups host alarm transitions (newest first) into one event per alarm episode (alertId), newest episode first. */
+/** The host writes state names in capitals ("YELLOW"); the page uses "Yellow". */
+const stateName = (s: string) => (s ? s.charAt(0).toUpperCase() + s.slice(1).toLowerCase() : s);
+const STATE_LEVEL: Record<string, number> = { Yellow: 0, Orange: 1, Red: 2 };
+
+/**
+ * Groups host alarm transitions (newest first) into one event per alarm episode (alertId), newest episode first. The event's
+ * condition is the label of the highest level reached: falling back to Yellow at the end of a cycle does not replace it.
+ */
 export function eventsFromTransitions(rows: Transition[]): RealEvent[] {
   const byId = new Map<string, RealEvent>();
-  for (const t of [...rows].sort((a, b) => a.timestampMs - b.timestampMs || a.id - b.id)) {
+  const peak = new Map<string, number>();
+  for (const raw of [...rows].sort((a, b) => a.timestampMs - b.timestampMs || a.id - b.id)) {
+    const t: Transition = { ...raw, from: stateName(raw.from), to: stateName(raw.to) };
     const id = t.alertId || `T-${t.camId}-${t.id}`;
     let e = byId.get(id);
     if (!e) {
@@ -95,7 +104,11 @@ export function eventsFromTransitions(rows: Transition[]): RealEvent[] {
       e.cleared = true;
       e.endMs = t.timestampMs;
     } else {
-      if (t.condition) e.condition = t.condition;
+      const level = STATE_LEVEL[t.to] ?? 0;
+      if (t.condition && level >= (peak.get(id) ?? -1)) {
+        e.condition = t.condition;
+        peak.set(id, level);
+      }
       if (t.place) e.place = t.place;
       const s = sevOf(t);
       if (RANK[s] > RANK[e.severity]) e.severity = s;

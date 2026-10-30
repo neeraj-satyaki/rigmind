@@ -22,6 +22,7 @@ struct DrawItem {
 // One model's result for one frame.
 struct DrawResult {
     std::string model;      // "ppe" or "idss"
+    std::string cam;        // camera the frame came from: results are matched by (cam, key)
     std::int64_t key = -1;  // buffer PTS in ns of the frame it was computed on
     std::vector<DrawItem> items;
     bool has_platform = false;           // IDSS only: platform box + scaled mask outline, as IDSS draws it

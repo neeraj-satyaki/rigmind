@@ -65,9 +65,11 @@ describe("PPE compliance events -> alerts", () => {
     fireEvent.click(screen.getByLabelText("Notifications"));
     await step("missing", ["vest"]);
     expect(h.toasts).toHaveLength(1);
-    expect(h.toasts[0]!.title).toContain("Advisory");
-    expect(h.toasts[0]!.opts.description).toContain("PPE not detected: vest");
-    expect(h.toasts[0]!.opts.description).not.toMatch(/not worn/i);
+    expect(h.toasts[0]!.title).toBe("PPE items not detected · CAM-01");
+    const body = render(h.toasts[0]!.opts.description);
+    expect(body.container.textContent).toContain("Summary pending"); // the SLM sentence is not there yet
+    expect(body.container.textContent).not.toMatch(/not worn/i);
+    body.unmount();
     // theme-coloured, slightly blurred toast with thick yellow text
     const glass = alertToastOptions("Advisory").style;
     expect(h.toasts[0]!.opts.style).toMatchObject({ color: glass.color, backdropFilter: expect.stringContaining("blur") });
@@ -76,13 +78,13 @@ describe("PPE compliance events -> alerts", () => {
     expect(h.tones).toHaveLength(0); // quiet
     expect(h.calls.filter((c) => c.method === "alert.raise")).toHaveLength(0); // the host stored the row
     expect(text()).toContain("PPE-CAM-01-b11");
-    expect(text()).toContain("PPE not detected: vest");
+    expect(text()).toContain("PPE items not detected");
+    expect(text()).toContain("Summary pending");
 
-    // repeat and set change: no new toast, the same bell row changes
+    // repeat and set change: no new toast, the same bell row stays one row
     await step("missing", ["vest"]);
-    await step("missing", ["vest", "gloves"], { condition: "PPE not detected: vest, gloves" });
+    await step("missing", ["vest", "gloves"]);
     expect(h.toasts).toHaveLength(1);
-    expect(text()).toContain("PPE not detected: vest, gloves");
     expect(screen.queryAllByText(/^PPE-/)).toHaveLength(1);
 
     await step("ok", []);
@@ -106,7 +108,8 @@ describe("PPE compliance events -> alerts", () => {
 
   it("works without host fields (plain fallback id)", async () => {
     const a = handlePpeEvent({ ev: "ppe", cam: "CAM-01", state: "missing", missing: ["vest", "gloves"] } as any);
-    expect(a).toMatchObject({ severity: "Advisory", condition: "PPE not detected: vest, gloves", place: "CAM-01", phase: "Open" });
+    expect(a).toMatchObject({ severity: "Advisory", condition: "PPE items not detected", place: "CAM-01", phase: "Open" });
+    expect(a).not.toHaveProperty("summary"); // not a host row: nothing to wait for
     expect(a!.id.length).toBeLessThanOrEqual(32);
   });
 

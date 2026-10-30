@@ -17,7 +17,9 @@ import { RotateCcw } from "lucide-react";
 import { useRealCameras, useStreamSources } from "@/lib/real-state";
 import { currentOperator, signOut } from "@/lib/auth";
 import { isNative, nativeCall } from "@/lib/native-bridge";
-import { describeAlert } from "@/lib/plain-summary";
+import { fetchAlertRow, onSummaryReady, requestSummary } from "@/lib/plain-summary";
+import { isHostRow } from "@/lib/alert-text";
+import { AlertDescription, SummaryChip } from "./AlertDescription";
 
 /** Runs a scripted detection through the C++ state machine; each transition comes back as an alert to raise. */
 async function runNativeDetection(realCam?: string) {
@@ -27,7 +29,7 @@ async function runNativeDetection(realCam?: string) {
     toast.error("No camera is configured", { description: "Add a camera under Administration / Cameras first." });
     return;
   }
-  const place = demoDataEnabled() ? (site ? `${site.rig} · ${site.area}` : "") : `Camera ${realCam}`;
+  const place = demoDataEnabled() ? (site ? `${site.rig} · ${site.area}` : "") : (realCam ?? "");
   try {
     const { alerts: raised } = await nativeCall<{ alerts: RaisedAlert[] }>("alarm.simulate", {
       scenario: "red",
@@ -36,7 +38,8 @@ async function runNativeDetection(realCam?: string) {
     });
     raised.forEach((a) => {
       raiseAlert(a);
-      describeAlert(a, cameras[0]?.id ?? "", place, (text) => toast(`${a.id} in plain words`, { description: text }));
+      // The host builds the prompt from what it stored for the alert; the sentence comes back on the alert row (and updates the toast).
+      requestSummary(a.id).catch((e) => console.warn("event.describe failed", e));
     });
   } catch (e) {
     toast.error("Detection could not be run", { description: String(e) });
@@ -54,6 +57,16 @@ function stamp(ms: number): string {
     second: "2-digit",
     hour12: false,
   });
+}
+
+/** Body of an alert toast: the SLM sentence, or the facts list, with the status chip while the sentence is not there. */
+function ToastBody({ text }: { text: ReturnType<typeof alertToastText> }) {
+  return (
+    <span>
+      {text.description}
+      <SummaryChip chip={text.chip} />
+    </span>
+  );
 }
 
 export function ThemeToggle() {
@@ -140,7 +153,9 @@ export function NavSearch() {
             className="block rounded p-2 hover:bg-field"
           >
             <Mono>{a.id}</Mono>
-            <p className="text-xs">{a.condition}</p>
+            <p className="text-xs">
+              <AlertDescription alert={a} />
+            </p>
           </Link>
         ))}
         {q &&
@@ -176,6 +191,33 @@ export function Notifications() {
   itemCount.current = items.length;
   useEffect(() => {
     const timers: ReturnType<typeof setTimeout>[] = [];
+    // Alerts toasted in this session, with the latest facts / SLM sentence read from the host row. When the sentence arrives
+    // the same toast (same id) is updated in place.
+    const latest = new Map<string, RaisedAlert>();
+    const present = (a: RaisedAlert) => {
+      latest.set(a.id, a);
+      const text = alertToastText(a);
+      // Coloured by level (Yellow / Orange / Red); toasts stack one above the other and stay until dismissed or replaced.
+      toast(text.title, {
+        id: a.id,
+        description: <ToastBody text={text} />,
+        duration: a.severity === "Critical" ? 30_000 : 15_000,
+        ...alertToastOptions(a.severity),
+      });
+    };
+    const merge = (id: string) => {
+      if (!isNative() || !latest.has(id)) return;
+      fetchAlertRow(id)
+        .then((row) => {
+          const prev = latest.get(id);
+          if (!row || row.id !== id || !prev) return;
+          const next: RaisedAlert = { ...prev, metadata: row.metadata ?? null, summary: row.summary ?? null, summarySource: row.summarySource ?? null, summaryAt: row.summaryAt ?? null };
+          present(next);
+          setExtra((x) => x.map((r) => (r.id === id ? { ...r, metadata: next.metadata, summary: next.summary, summarySource: next.summarySource, summaryAt: next.summaryAt } : r)));
+        })
+        .catch(() => {});
+    };
+    const offSummary = onSummaryReady(merge);
     const on = (e: Event) => {
       const a = (e as CustomEvent<RaisedAlert>).detail;
       timers.push(
@@ -188,14 +230,8 @@ export function Notifications() {
               : [{ ...a, at: now, updatedAt: now }, ...x],
           );
           setUnread((u) => (u ?? itemCount.current) + 1);
-          const text = alertToastText(a);
-          // Coloured by level (Yellow / Orange / Red); toasts stack one above the other and stay until dismissed or replaced.
-          toast(text.title, {
-            id: a.id,
-            description: text.description,
-            duration: a.severity === "Critical" ? 30_000 : 15_000,
-            ...alertToastOptions(a.severity),
-          });
+          present(a);
+          merge(a.id); // the host stored the facts before it sent the alarm line: show them in the toast at once
           playAlertSound(a.severity);
         }, LOGO_ALERT_MS),
       );
@@ -213,6 +249,7 @@ export function Notifications() {
     window.addEventListener(ALERT_RAISED, on);
     window.addEventListener(ALERT_UPDATED, onUpdate);
     return () => {
+      offSummary();
       window.removeEventListener(ALERT_RAISED, on);
       window.removeEventListener(ALERT_UPDATED, onUpdate);
       timers.forEach(clearTimeout);
@@ -252,7 +289,11 @@ export function Notifications() {
           {extra.length === 0 && items.length === 0 && (
             <p className="p-6 text-center text-sm text-muted-foreground">No alerts yet.</p>
           )}
-          {extra.map((a, i) => (
+          {extra.map((row, i) => {
+            // The feed row of the same id carries the newest facts and SLM sentence (polled every second).
+            const feed = items.find((f) => f.id === row.id);
+            const a = feed && isHostRow(feed) ? { ...row, metadata: feed.metadata, summary: feed.summary, summarySource: feed.summarySource } : row;
+            return (
             <Link
               key={`${a.id}-${i}`}
               to="/alerts"
@@ -264,8 +305,10 @@ export function Notifications() {
                 <Chip tone={a.severity === "Critical" ? "critical" : a.severity === "Warning" ? "warning" : "advisory"}>{a.severity}</Chip>
                 <Mono>{a.id}</Mono>
               </div>
-              <p className="mt-1 text-sm font-medium">{a.condition}</p>
-              <p className="text-xs text-muted-foreground">{a.place}</p>
+              <p className="mt-1 text-sm font-medium">
+                <AlertDescription alert={a} />
+              </p>
+              {!isHostRow(a) && <p className="text-xs text-muted-foreground">{a.place}</p>}
               <p className="font-mono text-[11px] text-muted-foreground">
                 {stamp(a.at)}
                 {a.phase === "Cleared" ? " · Cleared" : ""}
@@ -274,7 +317,8 @@ export function Notifications() {
                 <p className="font-mono text-[11px] text-muted-foreground">Updated {stamp(a.updatedAt)}</p>
               )}
             </Link>
-          ))}
+            );
+          })}
           {items.map((a) => (
             <Link
               key={a.id}
@@ -296,10 +340,14 @@ export function Notifications() {
                 </Chip>
                 <Mono>{a.id}</Mono>
               </div>
-              <p className="mt-1 text-sm font-medium">{a.condition}</p>
-              <p className="text-xs text-muted-foreground">
-                {a.rig} · {a.area}
+              <p className="mt-1 text-sm font-medium">
+                <AlertDescription alert={a} />
               </p>
+              {!isHostRow(a) && (
+                <p className="text-xs text-muted-foreground">
+                  {a.rig} · {a.area}
+                </p>
+              )}
               <p className="font-mono text-[11px] text-muted-foreground">{a.age}</p>
             </Link>
           ))}

@@ -1,5 +1,7 @@
 #include "alarm_recorder.h"
 
+#include "alert_metadata.h"
+
 #include <algorithm>
 #include <cctype>
 #include <chrono>
@@ -98,6 +100,35 @@ std::string AlarmRecorder::make_alert_id(const std::string& cam, int episode) co
     return prefixed_alert_id("ALM", cam, boot_, episode);
 }
 
+namespace {
+
+const char* state_label(AlarmState state) {
+    return state == AlarmState::None ? "Cleared" : level_label(level_of(state));
+}
+
+const char* peak_name(int peak) { return peak >= 2 ? "Red" : peak == 1 ? "Orange" : "Yellow"; }
+
+nlohmann::json fresh_meta(const std::string& cam) {
+    return {{"v", 1}, {"kind", "alarm"}, {"camera", cam}, {"peak", "Yellow"}, {"cycle", ""}, {"closed", false},
+            {"states", nlohmann::json::array()}};
+}
+
+void finish_meta(nlohmann::json& meta, int peak, const std::string& path, bool closed) {
+    meta["peak"] = peak_name(peak);
+    meta["cycle"] = path;
+    meta["closed"] = closed;
+}
+
+} // namespace
+
+void AlarmRecorder::note_facts(const nlohmann::json& facts_event, std::int64_t now_ms) {
+    if (!facts_event.is_object()) return;
+    const std::string cam = facts_event.value("cam", std::string());
+    if (safe_cam(cam).empty()) return;
+    std::lock_guard<std::mutex> lock(mutex_);
+    facts_[cam] = Facts{trim_facts(facts_event), now_ms};
+}
+
 nlohmann::json AlarmRecorder::handle(const nlohmann::json& event, std::int64_t now_ms) {
     nlohmann::json out = event;
     if (!event.is_object() || event.value("ev", std::string()) != "alarm") return out;
@@ -106,17 +137,10 @@ nlohmann::json AlarmRecorder::handle(const nlohmann::json& event, std::int64_t n
     const auto next = parse_state(event["state"].get<std::string>());
     if (!next) return out;
 
-    std::string condition = clip_text(event.value("condition", std::string()), 128);
-    std::string place = clip_text(event.value("place", std::string()), 128);
+    // Alert rows hold facts and neutral labels only. Any wording the line may carry is ignored: the plain-English
+    // description of an alert comes from the SLM, built from the stored metadata.
+    const std::string place = clip_text(cam, 128);
     const std::int64_t frame = event.value("frame", static_cast<std::int64_t>(0));
-
-    // The pipeline sends the state only; give the row and the summaries words that match the EWS chain.
-    if (condition.empty() && *next != AlarmState::None) {
-        condition = *next == AlarmState::Yellow ? "Machine present with link tilt angled"
-                    : *next == AlarmState::Orange ? "Elevator near the platform"
-                                                  : "Elevator in the platform danger zone";
-    }
-    if (place.empty()) place = "Camera " + cam;
 
     std::lock_guard<std::mutex> lock(mutex_);
     Camera& c = cameras_[cam];
@@ -126,24 +150,43 @@ nlohmann::json AlarmRecorder::handle(const nlohmann::json& event, std::int64_t n
     if (!changed && c.episode == 0) return out; // None repeated before any episode: nothing to attach
 
     nlohmann::json closed; // set when this line ends an event cycle
+    bool peak_raised = false;
     if (changed) {
+        nlohmann::json entry = {{"state", state_name(*next)}, {"tsMs", now_ms}, {"frame", frame}, {"facts", nullptr}};
+        const auto known = facts_.find(cam);
+        if (known != facts_.end()) {
+            entry["facts"] = known->second.facts;
+            entry["factsAgeMs"] = std::max<std::int64_t>(0, now_ms - known->second.at_ms);
+        }
+        const std::string next_label = state_label(*next);
+        const auto persist = [&](const std::string& alert_id, const nlohmann::json& meta) {
+            try {
+                store_.put_alert_metadata(alert_id, meta.dump(-1, ' ', false, nlohmann::json::error_handler_t::replace), now_ms);
+            } catch (const std::exception& e) {
+                std::cerr << "alert metadata failed: " << e.what() << '\n';
+            }
+        };
+
         // Event cycle: Yellow -> Orange -> ... -> Yellow. Falling back to Yellow from Orange or Red ends the cycle (its alert
         // row is Cleared with the peak it reached) and that Yellow is the baseline of the next cycle. Reaching None ends it too.
         AlarmState recorded_from = from;
+        bool closing = false, pushed_to_current = false;
+        const int old_peak = c.peak;
         if (level_of(from) >= 1 && (*next == AlarmState::Yellow || *next == AlarmState::None)) {
+            closing = true;
             c.path += *next == AlarmState::Yellow ? ">Y" : ">N";
             const bool critical = c.peak >= 2;
             closed = {{"alertId", c.alert_id}, {"peak", c.peak}, {"critical", critical},
                       {"cycle", c.path}, {"kind", critical ? "critical" : "normal"}};
-            if (condition.empty()) condition = c.condition;
-            if (place.empty()) place = c.place;
+            const std::string peak_label = level_label(c.peak);
             if (audit_) {
                 audit_->record("backend", "alarm.cycle", c.alert_id,
-                               clip_text(std::string(critical ? "critical" : "normal") + " cycle " + c.path + " | " + condition +
-                                             " | " + place + " | " + cam,
-                                         512),
+                               clip_text(std::string(critical ? "critical" : "normal") + " cycle " + c.path + " | " + peak_label + " | " + cam, 512),
                                now_ms);
             }
+            c.meta["states"].push_back(entry);
+            finish_meta(c.meta, c.peak, c.path, true);
+            persist(c.alert_id, c.meta);
             if (*next == AlarmState::Yellow) {
                 try {
                     EventStore::AlarmEpisodeRecord record;
@@ -153,7 +196,8 @@ nlohmann::json AlarmRecorder::handle(const nlohmann::json& event, std::int64_t n
                     record.to = *next;
                     record.severity = severity_of_level(c.peak);
                     record.status = "Cleared";
-                    record.condition = condition;
+                    record.condition = next_label;
+                    record.alert_condition = peak_label; // the row keeps its peak level
                     record.place = place;
                     record.frame = frame;
                     record.timestamp_ms = now_ms;
@@ -163,7 +207,7 @@ nlohmann::json AlarmRecorder::handle(const nlohmann::json& event, std::int64_t n
                 }
                 if (audit_) {
                     audit_->record("backend", "alarm.transition", c.alert_id,
-                                   clip_text(std::string(state_name(from)) + " -> Yellow | cycle closed | " + condition + " | " + place + " | " + cam, 512),
+                                   clip_text(std::string(state_name(from)) + " -> Yellow | cycle closed | " + peak_label + " | " + cam, 512),
                                    now_ms);
                 }
                 recorded_from = AlarmState::None; // the same Yellow opens the next cycle's row
@@ -175,17 +219,22 @@ nlohmann::json AlarmRecorder::handle(const nlohmann::json& event, std::int64_t n
             c.peak = -1;
             c.path.clear();
             c.alert_id = make_alert_id(cam, c.episode);
+            c.meta = fresh_meta(cam);
+            if (*next != AlarmState::None) {
+                c.meta["states"].push_back(entry);
+                pushed_to_current = true;
+            }
         }
         if (*next != AlarmState::None) c.path += (c.path.empty() ? "" : ">") + std::string(1, *next == AlarmState::Yellow ? 'Y' : *next == AlarmState::Orange ? 'O' : 'R');
         c.peak = std::max(c.peak, level_of(*next));
-        if (!condition.empty()) c.condition = condition;
-        if (!place.empty()) c.place = place;
+        peak_raised = c.peak > (recorded_from == AlarmState::None ? -1 : old_peak);
         c.state = *next;
+        if (!closing && !pushed_to_current) c.meta["states"].push_back(entry);
+        finish_meta(c.meta, c.peak, c.path, *next == AlarmState::None);
 
         const std::string status = *next == AlarmState::None ? "Cleared" : c.peak >= 1 ? "Escalated" : "Monitoring";
         const std::string severity = severity_of_level(c.peak);
-        const std::string& shown_condition = condition.empty() ? c.condition : condition;
-        const std::string& shown_place = place.empty() ? c.place : place;
+        const std::string row_label = level_label(c.peak);
         try {
             EventStore::AlarmEpisodeRecord record;
             record.cam_id = cam;
@@ -194,19 +243,19 @@ nlohmann::json AlarmRecorder::handle(const nlohmann::json& event, std::int64_t n
             record.to = *next;
             record.severity = severity;
             record.status = status;
-            record.condition = shown_condition;
-            record.place = shown_place;
+            record.condition = next_label;
+            record.alert_condition = row_label;
+            record.place = place;
             record.frame = frame;
             record.timestamp_ms = now_ms;
             store_.record_alarm_episode(record);
         } catch (const std::exception& e) {
             std::cerr << "alarm record failed: " << e.what() << '\n';
         }
+        persist(c.alert_id, c.meta);
         if (audit_) {
             audit_->record("backend", "alarm.transition", c.alert_id,
-                           clip_text(std::string(state_name(recorded_from)) + " -> " + state_name(*next) + " | " + shown_condition +
-                                         " | " + shown_place + " | " + cam,
-                                     512),
+                           clip_text(std::string(state_name(recorded_from)) + " -> " + state_name(*next) + " | " + row_label + " | " + cam, 512),
                            now_ms);
         }
     }
@@ -217,6 +266,9 @@ nlohmann::json AlarmRecorder::handle(const nlohmann::json& event, std::int64_t n
     out["escalation"] = std::max(0, level_of(c.state));
     out["peak"] = c.peak;
     out["changed"] = changed;
+    out["peakRaised"] = peak_raised;
+    out["condition"] = state_label(*next); // neutral label; the sentence comes from the SLM
+    out["place"] = place;
     if (closed.is_object()) out["closed"] = closed;
     return out;
 }
@@ -270,28 +322,35 @@ nlohmann::json PpeRecorder::handle(const nlohmann::json& event, std::int64_t now
         action = "cleared";
     }
     c.persons = persons;
+    c.since_ms = event.value("since_ms", static_cast<std::int64_t>(0));
     // 'not detected', never 'not worn': the camera may simply not see the item. A cleared row keeps the last missing set.
+    // The row holds a neutral label; the items and the people count are metadata, the sentence comes from the SLM.
+    const std::string label = "PPE items not detected";
     std::string list;
     for (const auto& m : c.missing) list += (list.empty() ? "" : ", ") + m;
-    c.condition = clip_text("PPE not detected: " + list, 128);
     if (changed) {
         const std::string status = c.open ? "Open" : "Cleared";
         try {
-            store_.upsert_alert(c.alert_id, "Advisory", c.condition, clip_text(cam, 128), status, now_ms);
+            store_.upsert_alert(c.alert_id, "Advisory", label, clip_text(cam, 128), status, now_ms);
+            const nlohmann::json meta = {{"v", 1}, {"kind", "ppe"}, {"camera", cam}, {"missing", c.missing}, {"persons", c.persons},
+                                         {"since_ms", c.since_ms}, {"closed", !c.open}};
+            store_.put_alert_metadata(c.alert_id, meta.dump(-1, ' ', false, nlohmann::json::error_handler_t::replace), now_ms);
         } catch (const std::exception& e) {
             std::cerr << "ppe record failed: " << e.what() << '\n';
         }
         if (audit_) {
             audit_->record("backend", "ppe.transition", c.alert_id,
-                           clip_text(action + " | " + c.condition + " | persons " + std::to_string(persons) + " | " + cam, 512),
+                           clip_text(action + " | " + label + ": " + list + " | persons " + std::to_string(persons) + " | " + cam, 512),
                            now_ms);
         }
     }
     out["alertId"] = c.alert_id;
     out["episode"] = c.episode;
     out["phase"] = c.open ? "Open" : "Cleared";
-    out["condition"] = c.condition;
+    out["condition"] = label;
+    out["place"] = clip_text(cam, 128);
     out["severity"] = "Advisory";
+    out["action"] = changed ? action : "";
     out["changed"] = changed;
     return out;
 }

@@ -70,6 +70,24 @@ export function DetectionControls({ camId }: { camId: string }) {
           {NAMES[m]}
         </button>
       ))}
+      {/* One switch for the picture itself: the camera frame with no inference drawn on it, or the inference back on. */}
+      <button
+        type="button"
+        data-testid="raw-frame-toggle"
+        aria-pressed={!prefs.ppe && !prefs.idss}
+        title={!prefs.ppe && !prefs.idss ? "Show the PPE and IDSS detections on the picture" : "Hide all detections: the camera frame as it comes in"}
+        onClick={() => {
+          const show = !prefs.ppe && !prefs.idss;
+          for (const m of MODELS) setOverlay(m, show);
+          nativeCall("stream.overlay", { cam: camId, ppe: show, idss: show }).catch(() => {});
+        }}
+        className={
+          "inline-flex h-7 items-center rounded-md border px-2 text-[11px] font-semibold " +
+          (!prefs.ppe && !prefs.idss ? "border-primary bg-primary/10 text-foreground" : "border-border text-muted-foreground")
+        }
+      >
+        {!prefs.ppe && !prefs.idss ? "Show inference" : "Hide inference"}
+      </button>
       {det.ppe?.state === "missing" && det.ppe.missing.length > 0 && (
         <span
           role="status"

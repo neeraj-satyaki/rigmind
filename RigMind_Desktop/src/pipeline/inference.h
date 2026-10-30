@@ -14,6 +14,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <functional>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -24,8 +25,10 @@
 
 #include "backend/alarm_state.h"
 #include "pipeline/draw_types.h"
+#include "pipeline/multi_camera.h"
 #include "pipeline/ppe_check.h"
 #include "pipeline/scene_trail.h"
+#include "pipeline/zone_filter.h"
 
 namespace rigmind {
 
@@ -59,8 +62,8 @@ class Inference {
 public:
     // Called from a worker thread with a finished JSON event ("detections"); the sink must be thread safe.
     using Emit = std::function<void(const nlohmann::json&)>;
-    // Called from the IDSS worker with the EWS facts derived from each frame's detections.
-    using FactsSink = std::function<void(const FrameFacts&, bool zoomed)>;
+    // Called from the IDSS worker with the EWS facts derived from each frame's detections, and the camera they belong to.
+    using FactsSink = std::function<void(const std::string& cam, const FrameFacts&, bool zoomed)>;
 
     Inference(std::filesystem::path models_dir, Emit emit, FactsSink facts = nullptr);
     ~Inference();
@@ -73,18 +76,22 @@ public:
     // too slow) contributes its newest earlier result if that is under 400 ms old, else nothing. It never waits for a model
     // that is not loaded.
     void set_overlay(bool ppe, bool idss) { overlay_ppe_ = ppe; overlay_idss_ = idss; }
-    std::vector<DrawResult> collect(std::int64_t key, std::chrono::milliseconds budget);
+    // Zone based inference: with an enabled zone for a camera only objects whose centre is inside it count for the alarm facts,
+    // the person tracking and the PPE check (the platform always counts). Safe to call from any thread.
+    void set_zone(const std::string& cam, Zone zone) { zones_.set(cam, std::move(zone)); }
+    std::vector<DrawResult> collect(const std::string& cam, std::int64_t key, std::chrono::milliseconds budget);
     // True when every drawn, loaded model has finished the frame(s) it was given. The live pacer releases the next frame only
     // when this holds, so each frame that is shown reaches the models and its result can be drawn on it (no stale boxes).
-    bool ready_for_frame() const;
+    bool ready_for_frame(const std::string& cam) const;
     // The newest detection frame and, for each drawn model, its newest result (within 1 s of that frame): the input for an
     // annotated still (alarm image evidence). Null when no frame has arrived yet.
-    std::shared_ptr<const Frame> latest_annotated(std::vector<DrawResult>& results);
+    // `cam` empty = the newest frame of any camera.
+    std::shared_ptr<const Frame> latest_annotated(std::vector<DrawResult>& results, const std::string& cam = std::string());
     // Overlay sync since the previous call: per model, how many frames / ms older than the drawn frame the result used was
     // (0 = the frame's own result), the share of exact results, and frames drawn with no result at all.
     nlohmann::json take_sync();
-    // Rates and thresholds since the previous call (the "inference" event); resets the window.
-    std::vector<ModelStats> take_stats();
+    // Rates and thresholds of one camera since the previous call for that camera (the "inference" event); resets its window.
+    std::vector<ModelStats> take_stats(const std::string& cam);
 
 private:
     struct Worker;
@@ -94,10 +101,9 @@ private:
     Emit emit_;
     FactsSink facts_;
     std::filesystem::path cache_dir_;
-    std::mutex mutex_;
+    mutable std::mutex mutex_;                 // guards slots_, stopping_ and every worker's pending set
     std::condition_variable wake_;
-    std::shared_ptr<const Frame> latest_;
-    std::uint64_t sequence_ = 0;
+    FrameSlots<Frame> slots_;                  // newest frame of each camera; each worker serves them round robin
     bool stopping_ = false;
     std::atomic<bool> overlay_ppe_{true}, overlay_idss_{true};
     struct SyncWindow {
@@ -107,15 +113,22 @@ private:
     SyncWindow sync_[2];
     mutable std::mutex draw_mutex_;
     std::condition_variable draw_cv_;
-    std::vector<DrawResult> history_[2];                              // per model (ppe, idss): newest last, a few frames
-    std::vector<std::pair<std::int64_t, std::chrono::steady_clock::time_point>> arrivals_; // key -> when it reached the tap
+    DrawHistory history_;                                             // per model, camera: results by (cam, PTS); arrivals
     void publish(DrawResult result);
-    SceneTrail scene_;                         // latest objects, outlines and centroid paths of both models
-    std::atomic<std::int64_t> scene_emit_ms_{0};
-    std::mutex persons_mutex_;                 // IDSS worker -> PPE worker: tracked 'derrickman' boxes for the PPE check
-    std::vector<PpePerson> persons_;
-    std::int64_t persons_ts_ = 0;
-    std::string persons_cam_;
+    ZoneBook zones_;                           // per camera, set by the host
+    struct SceneSlot {                         // latest objects, outlines and centroid paths of both models, for one camera
+        SceneTrail trail;
+        std::atomic<std::int64_t> emit_ms{0};
+    };
+    SceneSlot& scene_for(const std::string& cam);
+    std::mutex scene_mutex_;
+    std::map<std::string, std::unique_ptr<SceneSlot>> scene_;
+    struct PersonsSlot {
+        std::vector<PpePerson> persons;
+        std::int64_t ts = 0;
+    };
+    std::mutex persons_mutex_;                 // IDSS worker -> PPE worker: tracked 'derrickman' boxes of each camera for the PPE check
+    std::map<std::string, PersonsSlot> persons_;
     std::vector<std::unique_ptr<Worker>> workers_;
 };
 

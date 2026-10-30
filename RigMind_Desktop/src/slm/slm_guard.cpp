@@ -114,7 +114,8 @@ std::string reject_reason(const std::string& sentence, const nlohmann::json& eve
     if (!camera.empty() && text.find(camera) == std::string::npos) return "missing camera";
 
     // Place: any part before or after the middle dot is enough ("Demo rig 01 · Derrick board").
-    const std::string place = event.value("place", std::string());
+    std::string place = event.value("place", std::string());
+    if (lower(trim(place)) == camera) place.clear(); // the place is the camera id: naming the camera is enough
     const std::string dot = "\xC2\xB7"; // U+00B7
     std::vector<std::string> parts;
     std::size_t from = 0;
@@ -139,7 +140,8 @@ std::string with_context(const std::string& sentence, const nlohmann::json& even
     const std::string reason = reject_reason(sentence, event);
     if (reason != "missing camera" && reason != "missing place") return sentence;
     const std::string camera = event.value("camId", std::string());
-    const std::string place = event.value("place", std::string());
+    std::string place = event.value("place", std::string());
+    if (lower(trim(place)) == lower(camera)) place.clear(); // the place is the camera id: naming the camera is enough
     std::string head;
     const std::string text = lower(sentence);
     if (!camera.empty() && text.find(lower(camera)) == std::string::npos) head = "Camera " + camera;

@@ -30,7 +30,10 @@ export function StreamConnecting({ label = "Connecting", detail }: { label?: str
  * whenever the camera drops and the host is polling to reconnect. A new WebRTC session is made on every (re)connect.
  * Vanilla ICE: one offer with complete candidates, one answer event back from the host.
  */
-export function StreamVideo({ camId, uri, raw = false }: { camId: string; uri: string; raw?: boolean }) {
+/** "small": a thumbnail-sized transcode (640 x 360, low bitrate) for dashboard tiles; "full": the 1280 x 720 Live view. */
+export type StreamProfile = "small" | "full";
+
+export function StreamVideo({ camId, uri, raw = false, profile = "full" }: { camId: string; uri: string; raw?: boolean; profile?: StreamProfile }) {
   const ref = useRef<HTMLVideoElement>(null);
   const camera = useCamera(camId);
   const [playing, setPlaying] = useState(false);
@@ -99,7 +102,7 @@ export function StreamVideo({ camId, uri, raw = false }: { camId: string; uri: s
       await pc.setLocalDescription(offer);
       await waitForGathering(pc);
       if (closed) return;
-      await nativeCall("stream.offer", { cam: camId, sdp: pc.localDescription?.sdp ?? offer.sdp });
+      await nativeCall("stream.offer", { cam: camId, sdp: pc.localDescription?.sdp ?? offer.sdp, profile });
     })().catch((e) => console.warn("stream failed", camId, e));
 
     // The host drops the viewer if the pipeline restarts; if the picture stops, start a new session.
@@ -124,7 +127,7 @@ export function StreamVideo({ camId, uri, raw = false }: { camId: string; uri: s
       // The viewer leaves; the camera keeps recording and raising alarms.
       nativeCall("stream.detach", { cam: camId }).catch(() => {});
     };
-  }, [camId, state, session]);
+  }, [camId, state, session, profile]);
 
   let overlay: React.ReactNode = null;
   if (state === "offline") {

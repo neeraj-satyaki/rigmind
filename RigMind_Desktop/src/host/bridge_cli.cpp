@@ -30,9 +30,15 @@ public:
 } // namespace
 
 int main(int argc, char** argv) {
-    const bool stream = argc == 3 && std::string(argv[2]) == "--stream";
-    if (argc < 2 || argc > 3 || (argc == 3 && !stream)) {
-        std::cerr << "usage: rigmind-bridge-cli <db-path> [--stream]\n";
+    bool stream = false, fast_auth = false;
+    for (int i = 2; i < argc; ++i) {
+        const std::string flag = argv[i];
+        if (flag == "--stream") stream = true;
+        else if (flag == "--fast-auth") fast_auth = true; // generated test cases: 1000 password rounds instead of 600000
+        else argc = 0;
+    }
+    if (argc < 2) {
+        std::cerr << "usage: rigmind-bridge-cli <db-path> [--stream] [--fast-auth]\n";
         return 2;
     }
     try {
@@ -43,6 +49,7 @@ int main(int argc, char** argv) {
         rigmind::AuditLog audit(argv[1]);
         StdoutStreamSink sink;
         rigmind::Bridge bridge(store, stream ? &sink : nullptr, &audit);
+        if (fast_auth) bridge.set_auth_rounds(1000);
         audit.record("backend", "app.start", "", "bridge-cli", now_ms());
         std::string line;
         while (std::getline(std::cin, line)) {

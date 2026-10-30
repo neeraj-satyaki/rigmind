@@ -33,7 +33,7 @@ export function Chip({ tone = "neutral", children, dot, className }: { tone?: To
 }
 
 export function Card({ children, className }: { children: ReactNode; className?: string }) {
-  return <div className={cn("rounded-lg border border-border bg-card", className)}>{children}</div>;
+  return <div className={cn("rounded-lg border border-border bg-card transition-colors duration-200", className)}>{children}</div>;
 }
 
 export function CardHead({ title, sub, right }: { title: ReactNode; sub?: ReactNode; right?: ReactNode }) {

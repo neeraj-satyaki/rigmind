@@ -10,10 +10,14 @@ Deterministic (fixed seed). Self-checks the oracle against values derived by han
 """
 
 import csv
+import sys
 import itertools
 import json
 import random
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).parent))
+import more_cases  # noqa: E402  (newer host features: sign-in, evidence search, chat sessions)
 
 OUT = Path(__file__).with_name("test_cases.csv")
 SEED = 42
@@ -391,6 +395,13 @@ def main():
     rows += records_cases(rng, 2500)
     rows += alerts_cases(rng, 2500)
     assert_distinct(rows)
+    # newer host features: every row below expands to several checks when it runs (see more_checks.py)
+    more = random.Random(SEED + 1)
+    rows += more_cases.auth_scenarios(more, 90)
+    rows += more_cases.evidence_questions(more, 1000)
+    rows += more_cases.chat_cases(more, 650)
+    rows += more_cases.chat_trim_case()
+    rows += more_cases.bridge_new_cases(more, 10)
 
     with OUT.open("w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)

@@ -44,7 +44,8 @@ public:
         AlarmState to = AlarmState::None;
         std::string severity;  // severity of the alert after this transition (Advisory | Warning | Critical)
         std::string status;    // Monitoring | Escalated | Cleared
-        std::string condition;
+        std::string condition;        // neutral label of this transition's state (alarm_events row)
+        std::string alert_condition;  // neutral label of the alert row (the peak level); empty = use `condition`
         std::string place;
         std::int64_t frame = 0;
         std::int64_t timestamp_ms = 0;
@@ -63,7 +64,18 @@ public:
                        std::int64_t timestamp_ms);
     nlohmann::json list_alerts() const;
     // Raised alerts with their current status and owner, newest first (the live alert feed).
+    // Rows carry `metadata` (facts JSON, see alert_metadata.h, or null) and `summary` / `summarySource` / `summaryAt`
+    // (the SLM sentence; source 'slm', or 'template' when the model gave none; time; null while none was requested).
     nlohmann::json list_raised_alerts(int limit) const;
+    // One row of the same shape, or null.
+    nlohmann::json find_raised_alert(const std::string& id) const;
+
+    // Alert metadata (facts only, JSON text) by alert id; replaced on every change of the episode.
+    void put_alert_metadata(const std::string& alert_id, const std::string& json_text, std::int64_t timestamp_ms);
+    std::optional<std::string> get_alert_metadata(const std::string& alert_id) const;
+    // The SLM result for an alert. Empty text with source 'template' means the model gave nothing; it never overwrites
+    // a sentence stored earlier. The next result for the same alert id replaces the stored one.
+    void put_alert_summary(const std::string& alert_id, const std::string& text, const std::string& source, std::int64_t timestamp_ms);
 
     // Rows of the audit_log table (written by AuditLog) with this exact action, newest first. Empty when the
     // table does not exist yet. Rows still in the audit queue are not included.

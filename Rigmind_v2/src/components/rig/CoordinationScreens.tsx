@@ -499,7 +499,6 @@ export function Reports() {
   const realPilot = [
     { item: "Camera streams", status: realCams.length ? `${realCams.filter((c) => camStatus[c.id]?.state === "online").length} of ${realCams.length} online` : "No camera configured", tone: "neutral" as const },
     { item: "Rules & use cases", status: "Not approved", tone: "neutral" as const },
-    { item: "Detection quality", status: "Not measured", tone: "neutral" as const },
     { item: "Alert latency", status: "Not measured", tone: "neutral" as const },
     { item: "Alarm interface", status: "No field output connected", tone: "neutral" as const },
     { item: "Site UAT", status: "Not recorded", tone: "neutral" as const },

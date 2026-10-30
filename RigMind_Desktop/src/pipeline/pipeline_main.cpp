@@ -17,7 +17,7 @@
 //
 // Protocol, one JSON object per line:
 //   stdin : {"cmd":"open","cam":"CAM-01","uri":"rtsp://...","user":"","pass":""}   (user/pass optional; may also be in the URI)
-//           {"cmd":"offer","cam":"CAM-01","sdp":"..."}     (browser recvonly offer, full SDP)
+//           {"cmd":"offer","cam":"CAM-01","sdp":"..."}     (browser recvonly offer, full SDP; optional "profile":"small" 640x360 1200 kbps | "full" 1280x720 4000 kbps)
 //           {"cmd":"detach","cam":"CAM-01"}                (viewer left; camera keeps recording)
 //           {"cmd":"status"}                               (re-emit the status of every camera)
 //           {"cmd":"close","cam":"CAM-01"}                 (stop the camera and its reconnects)
@@ -48,6 +48,8 @@
 #include <memory>
 #include <set>
 #include "pipeline/inference.h"
+#include "pipeline/multi_camera.h"
+#include "pipeline/stream_profile.h"
 #include "pipeline/overlay_draw.h"
 #include "pipeline/snapshot_plan.h"
 #include <opencv2/core.hpp>
@@ -69,8 +71,12 @@ using json = nlohmann::json;
 
 namespace {
 
-// One live stream at a time: keeps RAM and GPU decode within a 4 GB machine.
-constexpr std::size_t kMaxCameras = 1;
+// Two live streams at most (state is per camera everywhere): keeps RAM and GPU decode within a small machine.
+// RIGMIND_MAX_CAMERAS overrides the limit (1 = the previous single-camera behaviour).
+std::size_t max_cameras() {
+    static const std::size_t limit = std::getenv("RIGMIND_MAX_CAMERAS") ? static_cast<std::size_t>(std::max(1, std::atoi(std::getenv("RIGMIND_MAX_CAMERAS")))) : 2;
+    return limit;
+}
 constexpr gint64 kConnectTimeoutUs = 25 * G_USEC_PER_SEC; // no first frame after this: reconnect
 constexpr gint64 kStallTimeoutUs = 6 * G_USEC_PER_SEC;    // online but no frame for this long: reconnect
 constexpr guint kRetryMinMs = 2000;
@@ -91,6 +97,7 @@ struct Camera {
     guint generation = 0;   // bumped for every pipeline built; stale callbacks compare it
     guint peer_serial = 0;  // bumped for every viewer
     guint variant = 0;      // index into the live branch candidates
+    std::string profile = "full"; // stream profile of the current viewer: "full" 1280x720 / 4000 kbps, "small" 640x360 / 1200 kbps
     gint64 started_us = 0;
 
     std::atomic<gint64> last_buffer_us{0};
@@ -152,23 +159,26 @@ void emit(const json& message) {
     std::cout << line << std::flush;
 }
 
-// Detections go to the WebView, which must not be flooded: at most kMaxDetectionLines per second over all models.
+// Detections go to the WebView, which must not be flooded: at most kMaxDetectionLines per second over all models OF ONE CAMERA
+// (a shared budget would let one camera starve the other).
 constexpr std::size_t kMaxDetectionLines = 30;
 std::mutex alarm_state_mutex;
-std::string last_alarm_state = "None"; // for the "facts" diagnostic
+std::map<std::string, std::string> last_alarm_state; // per camera, for the "facts" diagnostic
 void emit_inference_event(const json& message) {
     if (message.value("ev", std::string()) == "facts") {
         json with_state = message;
         std::lock_guard<std::mutex> lock(alarm_state_mutex);
-        with_state["state"] = last_alarm_state;
+        const auto at = last_alarm_state.find(message.value("cam", std::string()));
+        with_state["state"] = at == last_alarm_state.end() ? std::string("None") : at->second;
         emit(with_state);
         return;
     }
     if (message.value("ev", std::string()) == "detections") {
         static std::mutex mutex;
-        static std::deque<std::chrono::steady_clock::time_point> sent;
+        static std::map<std::string, std::deque<std::chrono::steady_clock::time_point>> sent_by_cam;
         const auto now = std::chrono::steady_clock::now();
         std::lock_guard<std::mutex> lock(mutex);
+        auto& sent = sent_by_cam[message.value("cam", std::string())];
         while (!sent.empty() && now - sent.front() > std::chrono::seconds(1)) sent.pop_front();
         if (sent.size() >= kMaxDetectionLines) return;
         sent.push_back(now);
@@ -178,7 +188,7 @@ void emit_inference_event(const json& message) {
 
 std::unique_ptr<rigmind::Inference> inference;
 std::atomic<std::uint64_t> overlay_frames{0}, overlay_drawn{0}, overlay_us{0}; // burn-in counters (stats event)
-std::atomic<bool> auto_facts{true};
+rigmind::CameraFactsBoard facts_board; // EWS facts and zoom flag per camera (never shared between cameras)
 std::string models_dir;
 
 void emit_error(const std::string& cam, const std::string& text) {
@@ -247,6 +257,9 @@ std::string gpu_scale() {
         "identity name=gate ! videoconvert ! ") + (std::getenv("RIGMIND_NO_BURNIN") ? "" :
         // The detections are burned into this BGR frame (pad probe on `ovl`) just before it is encoded.
         "video/x-raw,format=BGR ! identity name=ovl ! videoconvert ! ") +
+        // Per-viewer profile: the burn-in above always works on 1280x720; the size the encoder gets is set at offer time
+        // (apply_profile) through the caps of `vcaps`. Same size = videoscale passes the frames through untouched.
+        "videoscale name=vscale ! capsfilter name=vcaps caps=video/x-raw,width=1280,height=720 ! "
         "queue name=eq leaky=downstream max-size-buffers=2 max-size-bytes=0 max-size-time=0 ! ";
 }
 
@@ -287,11 +300,11 @@ GstPadProbeReturn on_pace_probe(GstPad* pad, GstPadProbeInfo* info, gpointer use
     if (inference && !inference_gate_off && cam->live_enabled.load(std::memory_order_relaxed) && now >= cam->gate_bypass_until_us) {
         const gint64 give_up = now + kMaxInferenceWaitUs;
         bool waited = false;
-        while (!inference->ready_for_frame() && g_get_monotonic_time() < give_up) {
+        while (!inference->ready_for_frame(cam->id) && g_get_monotonic_time() < give_up) {
             g_usleep(2000);
             waited = true;
         }
-        const bool timed_out = !inference->ready_for_frame();
+        const bool timed_out = !inference->ready_for_frame(cam->id);
         now = g_get_monotonic_time();
         if (timed_out) {
             ++pace_timeouts;
@@ -582,7 +595,7 @@ gboolean on_tick(gpointer) {
             cam.stats_bytes = bytes;
             cam.stats_us = now;
             if (inference) {
-                for (const auto& m : inference->take_stats()) {
+                for (const auto& m : inference->take_stats(cam.id)) {
                     if (!m.running) continue;
                     json event = {{"ev", "inference"}, {"cam", cam.id}, {"model", m.model}, {"fps", std::round(m.fps * 10) / 10},
                                   {"avg_ms", std::round(m.avg_ms * 10) / 10}, {"conf", std::round(m.conf * 1e4) / 1e4},
@@ -715,13 +728,34 @@ void handle_offer(Camera* cam, const std::string& sdp_text) {
     gst_webrtc_session_description_free(offer);
 }
 
+// Sets the output size and the bitrate of the camera's live chain for a viewer profile (pipeline/stream_profile.h). Called while the
+// gate is closed (no viewer attached), so no frame is in the encoder when the caps change. The encoder bitrate is a runtime property.
+void apply_profile(Camera& cam, const std::string& name) {
+    const rigmind::StreamProfile profile = rigmind::stream_profile(name);
+    cam.profile = profile.name;
+    if (!cam.live_bin) return;
+    if (GstElement* filter = gst_bin_get_by_name(GST_BIN(cam.live_bin), "vcaps")) {
+        GstCaps* caps = gst_caps_new_simple("video/x-raw", "width", G_TYPE_INT, profile.width, "height", G_TYPE_INT, profile.height, nullptr);
+        g_object_set(filter, "caps", caps, nullptr);
+        gst_caps_unref(caps);
+        gst_object_unref(filter);
+    }
+    if (GstElement* enc = gst_bin_get_by_name(GST_BIN(cam.live_bin), "enc")) {
+        const GstElementFactory* factory = gst_element_get_factory(enc);
+        const std::string factory_name = factory ? GST_OBJECT_NAME(factory) : "";
+        g_object_set(enc, "bitrate", rigmind::encoder_bitrate_value(profile, factory_name), nullptr);
+        gst_object_unref(enc);
+    }
+}
+
 // A viewer: a fresh webrtcbin on the live tee. The camera, cache and EWS keep running whether or not anyone watches.
-void attach_peer(Camera& cam, const std::string& sdp_text) {
+void attach_peer(Camera& cam, const std::string& sdp_text, const std::string& profile) {
     if (!cam.pipeline || !cam.live_tee) {
         emit_error(cam.id, "camera offline");
         return;
     }
     detach_peer(cam); // a new page load is a new browser peer
+    apply_profile(cam, profile);
     cam.webrtc = gst_element_factory_make("webrtcbin", nullptr);
     if (!cam.webrtc) {
         emit_error(cam.id, "missing GStreamer plugin (webrtc)");
@@ -814,7 +848,7 @@ gboolean on_bus(GstBus*, GstMessage* msg, gpointer user) {
             const std::string state = gst_structure_get_string(s, "state");
             {
                 std::lock_guard<std::mutex> lock(alarm_state_mutex);
-                last_alarm_state = state;
+                last_alarm_state[cam->id] = state;
             }
             emit({{"ev", "alarm"},
                   {"cam", gst_structure_get_string(s, "cam")},
@@ -839,50 +873,25 @@ gboolean on_bus(GstBus*, GstMessage* msg, gpointer user) {
 // EWS facts for the frames that follow. The "facts" command sets them now; the detector will set them
 // in-process later. All flags live in one atomic word, so the streaming thread reads a consistent
 // snapshot without a lock.
-struct FactField {
-    const char* name;
-    bool rigmind::FrameFacts::*member;
-};
-const FactField kFactFields[] = {
-    {"machine_present", &rigmind::FrameFacts::machine_present},
-    {"link_tilt_present", &rigmind::FrameFacts::link_tilt_present},
-    {"link_tilt_angled", &rigmind::FrameFacts::link_tilt_angled},
-    {"elevator_present", &rigmind::FrameFacts::elevator_present},
-    {"elevator_near_platform", &rigmind::FrameFacts::elevator_near_platform},
-    {"platform_elevator_collision", &rigmind::FrameFacts::platform_elevator_collision},
-    {"derrickman_out_of_safe_zone", &rigmind::FrameFacts::derrickman_out_of_safe_zone},
-    {"machine_past_right_edge", &rigmind::FrameFacts::machine_past_right_edge},
-    {"link_tilt_near_derrickman", &rigmind::FrameFacts::link_tilt_near_derrickman},
-};
-std::atomic<std::uint32_t> ews_facts{0};
-
-rigmind::FrameFacts facts_from_bits(std::uint32_t bits) {
-    rigmind::FrameFacts facts;
-    for (std::size_t i = 0; i < sizeof(kFactFields) / sizeof(kFactFields[0]); ++i) {
-        facts.*(kFactFields[i].member) = (bits >> i) & 1u;
-    }
-    return facts;
+// Facts derived from the IDSS detections (pipeline/ews_facts.h), kept PER CAMERA in facts_board (pipeline/multi_camera.h). A manual
+// "facts" command with "auto":false switches the detections off for that camera (no camera = all) so tests can drive the EWS by hand;
+// "auto":true switches them back on.
+void on_derived_facts(const std::string& cam, const rigmind::FrameFacts& facts, bool zoomed) {
+    facts_board.on_derived(cam, facts, zoomed);
 }
 
-// Facts derived from the IDSS detections (pipeline/ews_facts.h). A manual "facts" command with "auto":false switches
-// this off so tests can drive the EWS by hand; "auto":true switches it back on.
-std::atomic<bool> ews_zoom{false}; // IDSS zoomFlag: the EWS counters follow it, like the fact thresholds (ews.cpp setThresholds)
-void on_derived_facts(const rigmind::FrameFacts& facts, bool zoomed) {
-    if (!auto_facts.load()) return;
-    ews_zoom.store(zoomed, std::memory_order_relaxed);
-    std::uint32_t bits = 0;
-    for (std::size_t i = 0; i < sizeof(kFactFields) / sizeof(kFactFields[0]); ++i) {
-        if (facts.*(kFactFields[i].member)) bits |= 1u << i;
-    }
-    ews_facts.store(bits, std::memory_order_relaxed);
-}
-
-// Attaches the current facts to every frame that reaches the EWS branch. The tee shares buffers between
+// Attaches the facts of THIS probe's camera to every frame that reaches its EWS branch. The tee shares buffers between
 // branches, so the frame is made writable first; that copies only if another branch still holds it.
-GstPadProbeReturn on_facts_probe(GstPad*, GstPadProbeInfo* info, gpointer ews) {
-    if (auto_facts.load()) g_object_set(G_OBJECT(ews), "zoom", ews_zoom.load(std::memory_order_relaxed) ? TRUE : FALSE, nullptr);
+struct FactsProbe {
+    GstElement* ews;
+    std::string cam;
+};
+GstPadProbeReturn on_facts_probe(GstPad*, GstPadProbeInfo* info, gpointer user) {
+    const auto* probe = static_cast<const FactsProbe*>(user);
+    const rigmind::CameraFactsBoard::Entry entry = facts_board.get(probe->cam);
+    if (entry.automatic) g_object_set(G_OBJECT(probe->ews), "zoom", entry.zoom ? TRUE : FALSE, nullptr);
     GstBuffer* buffer = gst_buffer_make_writable(gst_pad_probe_info_get_buffer(info));
-    rigmind_facts_meta_add(buffer, facts_from_bits(ews_facts.load(std::memory_order_relaxed)));
+    rigmind_facts_meta_add(buffer, rigmind::facts_from_bits(entry.bits));
     GST_PAD_PROBE_INFO_DATA(info) = buffer;
     return GST_PAD_PROBE_OK;
 }
@@ -994,12 +1003,13 @@ std::chrono::milliseconds overlay_budget() {
     return budget;
 }
 
-GstPadProbeReturn on_overlay_probe(GstPad*, GstPadProbeInfo* info, gpointer) {
+GstPadProbeReturn on_overlay_probe(GstPad*, GstPadProbeInfo* info, gpointer user) {
     if (!inference) return GST_PAD_PROBE_OK;
+    const std::string& cam_id = static_cast<Camera*>(user)->id;
     GstBuffer* buffer = GST_PAD_PROBE_INFO_BUFFER(info);
     if (!GST_BUFFER_PTS_IS_VALID(buffer)) return GST_PAD_PROBE_OK;
     const auto started = std::chrono::steady_clock::now();
-    const std::vector<rigmind::DrawResult> results = inference->collect(static_cast<std::int64_t>(GST_BUFFER_PTS(buffer)), overlay_budget());
+    const std::vector<rigmind::DrawResult> results = inference->collect(cam_id, static_cast<std::int64_t>(GST_BUFFER_PTS(buffer)), overlay_budget());
     ++overlay_frames;
     if (!results.empty()) {
         buffer = gst_buffer_make_writable(buffer);
@@ -1170,6 +1180,9 @@ void start_pipeline(Camera& cam) {
         return;
     }
     g_clear_error(&parse_error);
+    cam.live_bin = live_bin;
+    apply_profile(cam, cam.profile); // a rebuilt chain (camera reconnect) keeps the profile of its viewer
+    cam.live_bin = nullptr;
 
     cam.pipeline = gst_pipeline_new(cam.id.c_str());
     GstElement* src = gst_element_factory_make("rtspsrc", "src");
@@ -1230,7 +1243,8 @@ void start_pipeline(Camera& cam) {
     }
 
     GstPad* alarm_in = gst_element_get_static_pad(alarm_queue, "sink");
-    gst_pad_add_probe(alarm_in, GST_PAD_PROBE_TYPE_BUFFER, on_facts_probe, ews, nullptr);
+    gst_pad_add_probe(alarm_in, GST_PAD_PROBE_TYPE_BUFFER, on_facts_probe, new FactsProbe{ews, cam.id},
+                      [](gpointer data) { delete static_cast<FactsProbe*>(data); });
     gst_object_unref(alarm_in);
     cam.rec_last_pts = 0;
     cam.pace_last_us = 0;
@@ -1271,7 +1285,7 @@ void start_pipeline(Camera& cam) {
     }
     if (GstElement* ovl = gst_bin_get_by_name(GST_BIN(live_bin), "ovl")) {
         if (GstPad* pad = gst_element_get_static_pad(ovl, "sink")) {
-            gst_pad_add_probe(pad, GST_PAD_PROBE_TYPE_BUFFER, on_overlay_probe, nullptr, nullptr);
+            gst_pad_add_probe(pad, GST_PAD_PROBE_TYPE_BUFFER, on_overlay_probe, &cam, nullptr);
             gst_object_unref(pad);
         }
         gst_object_unref(ovl);
@@ -1298,7 +1312,7 @@ void open_camera(const std::string& id, const std::string& uri, const std::strin
         emit_error(id, "invalid uri");
         return;
     }
-    if (cameras.find(id) == cameras.end() && cameras.size() >= kMaxCameras) {
+    if (cameras.find(id) == cameras.end() && cameras.size() >= max_cameras()) {
         emit_error(id, "camera limit reached");
         return;
     }
@@ -1468,7 +1482,7 @@ void end_evidence(Camera& cam, bool force) {
 bool write_snapshot(const Camera& cam, const std::filesystem::path& file) {
     if (!inference) return false;
     std::vector<rigmind::DrawResult> results;
-    const auto frame = inference->latest_annotated(results);
+    const auto frame = inference->latest_annotated(results, cam.id);
     if (!frame || frame->width != 1280 || frame->height != 720 || frame->rgb.size() != static_cast<std::size_t>(1280) * 720 * 3) return false;
     cv::Mat rgb(720, 1280, CV_8UC3, const_cast<std::uint8_t*>(frame->rgb.data()));
     cv::Mat bgr;
@@ -1554,7 +1568,7 @@ void handle_command(const std::string& text) {
     } else if (cmd == "offer") {
         auto it = cameras.find(cam);
         if (it == cameras.end()) emit_error(cam, "camera not open");
-        else attach_peer(it->second, command.value("sdp", std::string()));
+        else attach_peer(it->second, command.value("sdp", std::string()), command.value("profile", std::string("full")));
     } else if (cmd == "detach") {
         auto it = cameras.find(cam);
         if (it != cameras.end()) detach_peer(it->second);
@@ -1564,18 +1578,25 @@ void handle_command(const std::string& text) {
         close_camera(cam);
     } else if (cmd == "clip") {
         save_clip(cam);
+    } else if (cmd == "zone") {
+        // {"cmd":"zone","cam":"CAM-01","enabled":true,"points":[[x,y],...]}: points in percent of the frame. Disabled or fewer than
+        // 3 points = the whole picture counts.
+        if (inference) inference->set_zone(command.value("cam", std::string()), rigmind::parse_zone(command));
     } else if (cmd == "overlay") {
         // {"cmd":"overlay","cam":"CAM-01","ppe":true,"idss":true}: which models are burned into the video (default both).
         if (inference) inference->set_overlay(command.value("ppe", true), command.value("idss", true));
     } else if (cmd == "facts") {
         // {"cmd":"facts","cam":"CAM-01","machine_present":true,...}: unknown keys are ignored, missing keys are false.
         // "auto":false keeps the detections from overwriting these; "auto":true hands control back to them.
-        if (command.contains("auto")) auto_facts = command.value("auto", true);
+        // Per camera ("cam"); without "cam" the command applies to every camera.
+        if (command.contains("auto")) facts_board.set_auto(cam, command.value("auto", true));
         std::uint32_t bits = 0;
-        for (std::size_t i = 0; i < sizeof(kFactFields) / sizeof(kFactFields[0]); ++i) {
-            if (command.value(kFactFields[i].name, false)) bits |= 1u << i;
+        std::size_t field_count = 0;
+        const rigmind::FactField* fields = rigmind::fact_fields(field_count);
+        for (std::size_t i = 0; i < field_count; ++i) {
+            if (command.value(fields[i].name, false)) bits |= 1u << i;
         }
-        ews_facts.store(bits, std::memory_order_relaxed);
+        facts_board.set_manual(cam, bits);
     } else {
         emit_error(cam, "unknown command");
     }

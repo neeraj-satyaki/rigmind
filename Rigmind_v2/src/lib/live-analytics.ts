@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import { isNative, nativeCall } from "@/lib/native-bridge";
 import type { CameraStatus } from "@/lib/camera-status";
+import type { SummaryFields } from "@/lib/alert-text";
 
 export type LiveAlertRow = {
   id: string;
@@ -14,7 +15,7 @@ export type LiveAlertRow = {
   phase?: string;
   owner: string;
   raisedMs: number;
-};
+} & SummaryFields;
 
 export type SeverityCounts = { critical: number; warning: number; advisory: number };
 

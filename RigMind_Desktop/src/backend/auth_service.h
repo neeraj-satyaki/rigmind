@@ -28,6 +28,9 @@ public:
     };
     AuthService(EventStore& store, AuditLog* audit, Options options = {}) : store_(store), audit_(audit), options_(options) {}
 
+    // Rounds for accounts created from now on (the bridge CLI test mode only; the app always uses the default).
+    void set_iterations(std::uint32_t rounds) { options_.iterations = rounds; }
+
     nlohmann::json status() const;
     // Throws std::runtime_error with a user-readable message (policy, existing account, lockout, wrong credentials).
     nlohmann::json setup(const std::string& username, const std::string& password, std::int64_t now_ms);

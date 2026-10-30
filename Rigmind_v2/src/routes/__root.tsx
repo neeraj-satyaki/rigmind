@@ -149,7 +149,7 @@ function RootComponent() {
       {/* Required: nested routes render here. Removing <Outlet /> breaks all child routes. */}
       <AppState>
         <Outlet />
-        <Toaster expand visibleToasts={6} gap={10} {...toasterProps} />
+        <Toaster expand visibleToasts={4} gap={10} offset={16} style={{ "--width": "min(380px, calc(100vw - 32px))" } as React.CSSProperties} {...toasterProps} />
         {boot.visible && <BootSplash progress={boot.progress} status={boot.status} done={boot.done} />}
       </AppState>
     </QueryClientProvider>

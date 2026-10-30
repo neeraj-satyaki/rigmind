@@ -75,6 +75,50 @@ void ask_model(unsigned short port, SlmClient::OnLine on_line, nlohmann::json co
                 .dump());
 }
 
+// Chat about evidence: the prompt carries the matching evidence and alerts; the model may use nothing else. Free text of a few
+// sentences (no one-sentence guard, no action line), cleaned of markdown and capped. A failure answers with no text.
+const char* kChatSystemMessage =
+    "You answer questions about rig-safety evidence. Use only the data in the message. If the data does not answer the question, say so. "
+    "Reply in plain sentences, at most four, no lists and no markdown.";
+
+void ask_chat(unsigned short port, SlmClient::OnLine on_line, nlohmann::json command) {
+    std::string text;
+    try {
+        const nlohmann::json body = {
+            {"messages", {{{"role", "system"}, {"content", kChatSystemMessage}}, {{"role", "user"}, {"content", command.value("prompt", std::string())}}}},
+            {"max_tokens", 220},
+            {"temperature", 0},
+        };
+        const nlohmann::json reply = nlohmann::json::parse(post_json(port, body.dump()));
+        std::string raw = reply.at("choices").at(0).at("message").at("content").get<std::string>();
+        for (const char* mark : {"**", "##", "__"}) {
+            for (std::size_t at; (at = raw.find(mark)) != std::string::npos;) raw.erase(at, 2);
+        }
+        // collapse whitespace, trim, cap at 900 characters on a character boundary
+        std::string clean;
+        bool space = false;
+        for (unsigned char ch : raw) {
+            if (ch == ' ' || ch == '\n' || ch == '\r' || ch == '\t') {
+                space = !clean.empty();
+                continue;
+            }
+            if (space) clean += ' ';
+            space = false;
+            clean += static_cast<char>(ch);
+        }
+        if (clean.size() > 900) {
+            std::size_t cut = 900;
+            while (cut > 0 && (static_cast<unsigned char>(clean[cut]) & 0xC0) == 0x80) --cut;
+            clean.resize(cut);
+        }
+        text = clean;
+    } catch (const std::exception&) {
+        text.clear();
+    }
+    on_line(nlohmann::json{{"ev", "chat"}, {"chatId", command.value("chatId", std::string())},
+                           {"text", text.empty() ? nlohmann::json(nullptr) : nlohmann::json(text)}}.dump());
+}
+
 } // namespace
 
 SlmClient::SlmClient(const std::wstring& server_exe, const std::wstring& model, unsigned short port, OnLine on_line)
@@ -107,6 +151,10 @@ SlmClient::~SlmClient() {
 }
 
 void SlmClient::answer_template(const nlohmann::json& command, const char* reason) const {
+    if (command.value("cmd", std::string()) == "chat") { // a chat question that could not be answered: no text
+        on_line_(nlohmann::json{{"ev", "chat"}, {"chatId", command.value("chatId", std::string())}, {"text", nullptr}, {"reason", reason}}.dump());
+        return;
+    }
     on_line_(nlohmann::json{{"ev", "description"}, {"alertId", command.value("alertId", std::string())},
                             {"text", nullptr}, {"source", "template"}, {"reason", reason}}.dump());
 }
@@ -145,6 +193,7 @@ void SlmClient::work() {
             answer_template(job.command, "waited too long");
             continue;
         }
-        ask_model(port_, on_line_, job.command);
+        if (job.command.value("cmd", std::string()) == "chat") ask_chat(port_, on_line_, job.command);
+        else ask_model(port_, on_line_, job.command);
     }
 }

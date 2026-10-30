@@ -1,136 +1,132 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { render, screen, waitFor } from "@testing-library/react";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import { render, screen } from "@testing-library/react";
 import type { NativeEvent } from "@/lib/native-bridge";
 
 const host = vi.hoisted(() => ({
   listeners: new Set<(e: NativeEvent) => void>(),
   call: vi.fn(),
-  store: new Map<string, unknown>(),
+  feed: [] as unknown[],
 }));
 
 vi.mock("@/lib/native-bridge", () => ({
   isNative: () => true,
-  nativeCall: (...a: unknown[]) => host.call(...a),
+  nativeCall: (method: string, params: unknown) => {
+    host.call(method, params);
+    if (method === "alerts.feed") return Promise.resolve(host.feed);
+    return Promise.resolve({});
+  },
   onNativeEvent: (l: (e: NativeEvent) => void) => {
     host.listeners.add(l);
     return () => host.listeners.delete(l);
   },
 }));
 vi.mock("@/lib/device-db", () => ({
-  writeDevice: async (k: string, v: unknown) => void host.store.set(k, v),
-  readDevice: async (k: string) => host.store.get(k),
-  listDevice: async (prefix: string) =>
-    [...host.store].filter(([k]) => k.startsWith(prefix)).map(([key, value]) => ({ key, value })),
+  writeDevice: async () => {},
+  readDevice: async () => undefined,
+  listDevice: async () => [],
 }));
 
-import {
-  describeAlert,
-  loadPlainSummaries,
-  plainSummaryCsvRows,
-  resolveDescription,
-  type PlainSummary,
-} from "@/lib/plain-summary";
+import { loadPlainSummaries, onSummaryReady, plainSummaryCsvRows, plainSummaryFromRow, requestSummary, summaryReportText, type FeedRow } from "@/lib/plain-summary";
 import { PlainSummaryTable, chunkPlainSummaries } from "@/reports/PlainSummaryTable";
 import { RegisterReport, registerCsvRows } from "@/reports/templates/register";
 
-const alert = { id: "EV-2001", severity: "Critical", condition: "Platform-elevator collision", place: "Rig 1", };
-const TEMPLATE = "At 01 Oct, camera CAM-01 at Rig 1 recorded: Platform-elevator collision. This Critical alert needs immediate action.";
-const SENTENCE = "Camera CAM-01 at Rig 1 saw a platform-elevator collision, so this critical alert needs immediate action.";
-const emit = (e: NativeEvent) => host.listeners.forEach((l) => l(e));
+const SENTENCE = "Camera CAM-01 saw the elevator near the platform with the link tilt angled 28 degrees. Check the area and confirm the crew is clear.";
+
+const meta = {
+  v: 1,
+  kind: "alarm",
+  camera: "CAM-01",
+  peak: "Orange",
+  cycle: "Y>O>Y",
+  closed: true,
+  states: [
+    { state: "Yellow", tsMs: 1000, frame: 1, facts: { machine_present: true, link_tilt_present: true, link_tilt_angled: true, angle_deg: 28.2 } },
+    { state: "Orange", tsMs: 2000, frame: 2, facts: { machine_present: true, link_tilt_present: true, link_tilt_angled: true, elevator_present: true, elevator_near_platform: true, angle_deg: 28.4 } },
+  ],
+};
+const row = (id: string, extra: Partial<FeedRow> = {}): FeedRow => ({
+  id,
+  severity: "Warning",
+  condition: "Orange alert",
+  place: "CAM-01",
+  phase: "Cleared",
+  raisedMs: Date.parse("2026-10-01T10:00:00Z"),
+  metadata: meta,
+  summary: null,
+  summarySource: null,
+  summaryAt: null,
+  ...extra,
+});
 
 beforeEach(() => {
   host.listeners.clear();
-  host.store.clear();
   host.call.mockReset();
-});
-afterEach(() => vi.useRealTimers());
-
-describe("resolveDescription", () => {
-  it("shows the SLM sentence when source is slm", () => {
-    expect(resolveDescription({ text: SENTENCE, source: "slm" }, TEMPLATE)).toEqual({ text: SENTENCE, source: "slm" });
-  });
-  it("falls back to the template when source is template or text is null/empty", () => {
-    for (const msg of [{ text: null, source: "template" }, { text: null, source: "slm" }, { text: "  ", source: "slm" }, { text: SENTENCE, source: "template" }]) {
-      expect(resolveDescription(msg, TEMPLATE)).toEqual({ text: TEMPLATE, source: "template" });
-    }
-  });
+  host.feed = [];
 });
 
-describe("describeAlert (toast text)", () => {
-  it("shows the BitNet sentence when the host sends it after the reply", async () => {
-    host.call.mockResolvedValue({ text: TEMPLATE, slm: true });
-    const show = vi.fn();
-    await describeAlert(alert, "CAM-01", "Rig 1", show);
-    expect(show).not.toHaveBeenCalled();
-    emit({ ev: "description", alertId: "EV-2000", text: "other", source: "slm" }); // other alert: ignored
-    emit({ ev: "description", alertId: "EV-2001", text: SENTENCE, source: "slm" });
-    expect(show).toHaveBeenCalledExactlyOnceWith(SENTENCE, "slm");
-    expect(host.listeners.size).toBe(0);
-    await waitFor(() => expect(host.store.get("plain:EV-2001")).toMatchObject({ text: SENTENCE, source: "slm" }));
-  });
-
-  it("still shows the sentence when the host sends it before the reply", async () => {
-    host.call.mockImplementation(async () => {
-      emit({ ev: "description", alertId: "EV-2001", text: SENTENCE, source: "slm" });
-      return { text: TEMPLATE, slm: true };
-    });
-    const show = vi.fn();
-    await describeAlert(alert, "CAM-01", "Rig 1", show);
-    expect(show).toHaveBeenCalledExactlyOnceWith(SENTENCE, "slm");
-  });
-
-  it("shows the template at once when no model runs", async () => {
-    host.call.mockResolvedValue({ text: TEMPLATE, slm: false });
-    const show = vi.fn();
-    await describeAlert(alert, "CAM-01", "Rig 1", show);
-    expect(show).toHaveBeenCalledExactlyOnceWith(TEMPLATE, "template");
-    expect(host.listeners.size).toBe(0);
-  });
-
-  it("falls back to the template on a null description and on timeout", async () => {
-    host.call.mockResolvedValue({ text: TEMPLATE, slm: true });
-    const a = vi.fn();
-    await describeAlert(alert, "CAM-01", "Rig 1", a);
-    emit({ ev: "description", alertId: "EV-2001", text: null, source: "template" });
-    expect(a).toHaveBeenCalledExactlyOnceWith(TEMPLATE, "template");
-
-    vi.useFakeTimers();
-    const b = vi.fn();
-    await describeAlert({ ...alert, id: "EV-2002" }, "CAM-01", "Rig 1", b, 1000);
-    vi.advanceTimersByTime(1001);
-    expect(b).toHaveBeenCalledExactlyOnceWith(TEMPLATE, "template");
-    expect(host.listeners.size).toBe(0);
-  });
-});
-
-const summary = (id: string, text: string, source: PlainSummary["source"]): PlainSummary => ({
-  alertId: id, severity: "Critical", condition: "Platform-elevator collision", place: "Rig 1", camId: "CAM-01", text, source, at: `2026-10-01T10:0${id.slice(-1)}:00Z`,
-});
-
-describe("reports include plain-language summaries", () => {
-  it("stored summaries are loaded oldest first and exported to CSV rows", async () => {
-    host.store.set("plain:EV-2002", summary("EV-2002", TEMPLATE, "template"));
-    host.store.set("plain:EV-2001", summary("EV-2001", SENTENCE, "slm"));
+describe("summaries are read from the host rows", () => {
+  it("loads the alerts that have or await a sentence, oldest first; a Yellow-only row has none", async () => {
+    host.feed = [
+      row("ALM-CAM-01-b2", { raisedMs: 3_000_000, summary: SENTENCE, summarySource: "slm", summaryAt: 3_500_000 }),
+      row("ALM-CAM-01-b1", { raisedMs: 1_000_000 }),
+      row("ALM-CAM-01-b0", { raisedMs: 500_000, condition: "Yellow monitoring", severity: "Advisory", metadata: { ...meta, peak: "Yellow", states: [meta.states[0]!] } }),
+    ];
     const list = await loadPlainSummaries();
-    expect(list.map((s) => s.alertId)).toEqual(["EV-2001", "EV-2002"]);
-    const rows = plainSummaryCsvRows(list);
-    expect(rows[0]).toMatchObject({ "Alert ID": "EV-2001", "Plain-language summary": SENTENCE, Source: "BitNet", "Camera · place": "CAM-01 · Rig 1" });
-    expect(rows[1]).toMatchObject({ Source: "Template" });
+    expect(list.map((s) => s.alertId)).toEqual(["ALM-CAM-01-b1", "ALM-CAM-01-b2"]);
+    expect(list[0]).toMatchObject({ text: "", source: "none", status: "pending", chip: "Summary pending", camId: "CAM-01" });
+    expect(list[0]!.facts).toBe("machine present, link tilt angled 28°, elevator near platform");
+    expect(list[1]).toMatchObject({ text: SENTENCE, source: "slm", status: "ready", chip: null });
+    expect(host.call).toHaveBeenCalledWith("alerts.feed", { limit: 500 });
   });
 
-  it("the table shows each sentence and its source; long lists split over sheets", () => {
-    render(<PlainSummaryTable rows={[summary("EV-2001", SENTENCE, "slm"), summary("EV-2002", TEMPLATE, "template")]} />);
+  it("exports the sentence, the facts and the source to CSV rows", () => {
+    const list = [plainSummaryFromRow(row("A1", { summary: SENTENCE, summarySource: "slm", summaryAt: 1 }))!, plainSummaryFromRow(row("A2", { summarySource: "unavailable" }))!];
+    const rows = plainSummaryCsvRows(list);
+    expect(rows[0]).toMatchObject({ "Alert ID": "A1", "Plain-language summary": SENTENCE, Source: "BitNet", "Camera · place": "CAM-01", "Level label": "Orange alert" });
+    expect(rows[1]).toMatchObject({ "Plain-language summary": "", Source: "BitNet not available" });
+    expect(rows[1]!.Facts).toContain("elevator near platform");
+  });
+
+  it("the report table shows the sentence once it exists, else label, camera and facts with the status", () => {
+    const done = plainSummaryFromRow(row("A1", { summary: SENTENCE, summarySource: "slm", summaryAt: 1 }))!;
+    const waiting = plainSummaryFromRow(row("A2"))!;
+    const noModel = plainSummaryFromRow(row("A3", { summarySource: "unavailable" }))!;
+    expect(summaryReportText(waiting)).toBe("Orange alert · CAM-01 · machine present, link tilt angled 28°, elevator near platform");
+    render(<PlainSummaryTable rows={[done, waiting, noModel]} />);
     expect(screen.getByText(SENTENCE)).toBeInTheDocument();
     expect(screen.getByText("BitNet")).toBeInTheDocument();
-    expect(screen.getByText("Template")).toBeInTheDocument();
-    expect(chunkPlainSummaries(Array.from({ length: 17 }, (_, i) => summary(`EV-${i}`, "x", "slm"))).map((c) => c.length)).toEqual([8, 8, 1]);
+    expect(screen.getAllByText("Orange alert · CAM-01 · machine present, link tilt angled 28°, elevator near platform")).toHaveLength(2);
+    expect(screen.getByText("Summary pending")).toBeInTheDocument();
+    expect(screen.getByText("BitNet not available")).toBeInTheDocument();
+    expect(chunkPlainSummaries(Array.from({ length: 17 }, () => done)).map((c) => c.length)).toEqual([8, 8, 1]);
   });
 
-  it("the event register report lists stored summaries and adds a CSV column", async () => {
-    host.store.set("plain:EV-2001", summary("EV-2001", SENTENCE, "slm"));
+  it("the event register report lists the host summaries and adds a CSV column", async () => {
+    host.feed = [row("ALM-CAM-01-b1", { summary: SENTENCE, summarySource: "slm", summaryAt: 1 })];
     render(<RegisterReport page="01 / 01" />);
-    expect(await screen.findByText(SENTENCE)).toBeInTheDocument();
-    expect(registerCsvRows([summary("EV-1042", SENTENCE, "slm")]).find((r) => r["Event ID"] === "EV-1042")?.["Plain-language summary"]).toBe(SENTENCE);
+    expect(await screen.findAllByText(new RegExp("Camera CAM-01 saw the elevator"))).not.toHaveLength(0);
+    expect(registerCsvRows([plainSummaryFromRow(row("EV-1042", { summary: SENTENCE, summarySource: "slm" }))!]).find((r) => r["Event ID"] === "EV-1042")?.["Plain-language summary"]).toBe(SENTENCE);
     expect(registerCsvRows([])[0]).toHaveProperty("Plain-language summary", "");
+  });
+});
+
+describe("manual re-run and the ready signal", () => {
+  it("'Plain words' sends only the alert id (the host builds the prompt from its stored metadata)", async () => {
+    await requestSummary("ALM-CAM-01-b1", 5);
+    const [method, params] = host.call.mock.calls[0]!;
+    expect(method).toBe("event.describe");
+    expect(params).toMatchObject({ alertId: "ALM-CAM-01-b1", sceneTs: 5 });
+    expect(params).not.toHaveProperty("condition");
+    expect(params).not.toHaveProperty("place");
+  });
+
+  it("onSummaryReady reports description events by alert id", () => {
+    const seen: string[] = [];
+    const off = onSummaryReady((id) => seen.push(id));
+    host.listeners.forEach((l) => l({ ev: "description", alertId: "A1", text: SENTENCE, source: "slm" } as NativeEvent));
+    host.listeners.forEach((l) => l({ ev: "status", cam: "CAM-01" } as NativeEvent));
+    expect(seen).toEqual(["A1"]);
+    off();
+    expect(host.listeners.size).toBe(0);
   });
 });

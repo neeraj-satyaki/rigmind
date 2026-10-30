@@ -1,3 +1,4 @@
+import { alertDescription, isHostRow, type SummaryFields } from "@/lib/alert-text";
 /** One colour per alarm level, shared by toasts, the bell and the Live chip: Yellow, Orange, Red. */
 export type AlertColors = { background: string; color: string; borderColor: string };
 
@@ -22,21 +23,37 @@ export function alertToastOptions(severity: string) {
       background: "var(--toast-bg)", // light: the theme colour at a third; dark: the loading-screen navy; both see-through, the blur keeps the text readable
       color: text,
       border: `2px solid ${rim}`,
-      backdropFilter: "blur(18px) saturate(170%)",
-      WebkitBackdropFilter: "blur(18px) saturate(170%)",
+      backdropFilter: "blur(26px) saturate(180%)",
+      WebkitBackdropFilter: "blur(26px) saturate(180%)",
       boxShadow: `0 10px 28px color-mix(in srgb, ${rim} 35%, transparent), inset 0 1px 0 rgba(255,255,255,0.22)`, // soft glow in the rim colour + glass top highlight
       borderRadius: "14px",
     } as React.CSSProperties,
     classNames: {
       title: "!font-black !text-[16px] !tracking-tight !text-inherit",
-      description: "!text-inherit !font-bold !opacity-100",
+      description: "!text-inherit !font-bold !opacity-100 line-clamp-4 break-words", // four lines at most: a long summary must not push the stack off the window
     },
     descriptionClassName: "!text-inherit font-bold",
   };
 }
 
-/** Title and description for the toast of one raised alert. */
-export function alertToastText(a: { id: string; severity: string; condition: string; place: string }) {
-  const level = a.severity === "Critical" ? "Red" : a.severity === "Warning" ? "Orange" : "Yellow";
-  return { title: `${level} · ${a.severity} safety event`, description: `${a.id} · ${a.condition} · ${a.place}` };
+/**
+ * Title and description for the toast of one raised alert. Host alerts: title "Orange alert · CAM-01" (neutral level label and camera);
+ * description = the SLM sentence once it exists, else the facts that were true (a plain list) with a status chip. Sample alerts
+ * (no host metadata) keep their old text.
+ */
+export function alertToastText(a: { id: string; severity: string; condition: string; place: string } & SummaryFields): {
+  title: string;
+  description: string;
+  chip: string | null;
+  isSummary: boolean;
+} {
+  if (!isHostRow(a)) {
+    const level = a.severity === "Critical" ? "Red" : a.severity === "Warning" ? "Orange" : "Yellow";
+    return { title: `${level} · ${a.severity} safety event`, description: `${a.id} · ${a.condition} · ${a.place}`, chip: null, isSummary: false };
+  }
+  const d = alertDescription(a);
+  const camera = a.metadata?.camera || a.place;
+  // The text after the title already names the level and the camera when the summary is not there yet.
+  const description = d.isSummary ? d.text : d.facts;
+  return { title: [a.condition, camera].filter(Boolean).join(" · "), description, chip: d.chip, isSummary: d.isSummary };
 }

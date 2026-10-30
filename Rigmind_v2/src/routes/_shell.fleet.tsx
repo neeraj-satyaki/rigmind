@@ -23,6 +23,7 @@ import {
 import { NoteDialog } from "@/components/rig/workflow";
 import { eventActivity, kpis, rigs, severityTone } from "@/data/mock";
 import { demoDataEnabled } from "@/lib/demo-mode";
+import { StreamVideo } from "@/components/rig/StreamVideo";
 import { useAppState } from "@/components/rig/AppState";
 import { availability, useCameras } from "@/lib/camera-status";
 import { dayLabel, useRealCameras, useRealEvents, useStreamSources } from "@/lib/real-state";
@@ -39,7 +40,8 @@ function Fleet() {
   const demo = demoDataEnabled();
   const { items } = useAppState();
   const status = useCameras();
-  const realCams = useRealCameras(useStreamSources());
+  const sources = useStreamSources();
+  const realCams = useRealCameras(sources);
   const { events } = useRealEvents();
   const open = items.filter((a) => a.status === "Open" || a.status === "Escalated" || a.status === "Monitoring");
   const worst = [...open].sort((a, b) => SEV_ORDER.indexOf(a.severity) - SEV_ORDER.indexOf(b.severity))[0];
@@ -273,7 +275,9 @@ function Fleet() {
             ) : (
               realCams.slice(0, 2).map((c) => (
                 <CameraTile key={c.id} id={c.id} area={c.area} offline={status[c.id]?.state !== "online"} live>
-                  <div className="absolute inset-0 flex items-center justify-center text-[11px] text-white/70">Stream online. Open Live view to watch.</div>
+                  {/* The output stream (with the detections), transcoded small for the tile; Live view has the full size. */}
+                  {/* An offline camera already shows "Camera offline" in the tile itself: nothing more to say. */}
+                  {sources[c.id] && status[c.id]?.state === "online" && <StreamVideo camId={c.id} uri={sources[c.id]!} profile="small" />}
                 </CameraTile>
               ))
             )}

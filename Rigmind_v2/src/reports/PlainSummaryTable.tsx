@@ -1,5 +1,5 @@
 import { DataTable, SeverityPill } from "./components";
-import { plainSummaryCsvRows, type PlainSummary } from "@/lib/plain-summary";
+import { plainSummaryCsvRows, summaryReportText, type PlainSummary } from "@/lib/plain-summary";
 
 /** Rows per printed sheet. */
 export const PLAIN_ROWS_PER_SHEET = 8;
@@ -10,7 +10,7 @@ export function chunkPlainSummaries(list: PlainSummary[], size = PLAIN_ROWS_PER_
   return out;
 }
 
-/** Plain-language sentence per alert, marked BitNet or template. */
+/** Per alert: the SLM sentence (source BitNet), or its label, camera and facts with the status "Summary pending" / "BitNet not available". */
 export function PlainSummaryTable({ rows }: { rows: PlainSummary[] }) {
   const csv = plainSummaryCsvRows(rows);
   return (
@@ -26,7 +26,7 @@ export function PlainSummaryTable({ rows }: { rows: PlainSummary[] }) {
         <tr key={r.alertId}>
           <td>{r.alertId}</td>
           <td><SeverityPill sev={r.severity as Parameters<typeof SeverityPill>[0]["sev"]} /></td>
-          <td>{r.text}</td>
+          <td>{summaryReportText(r)}</td>
           <td>{csv[i]?.Source}</td>
         </tr>
       ))}

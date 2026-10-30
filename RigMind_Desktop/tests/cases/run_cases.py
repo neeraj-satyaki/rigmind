@@ -5,6 +5,7 @@ Exit code 0 only if every case passes. One CLI process and a fresh SQLite file p
 """
 
 import csv
+import os
 import json
 import subprocess
 import sys
@@ -13,6 +14,8 @@ import time
 from pathlib import Path
 
 HERE = Path(__file__).parent
+sys.path.insert(0, str(HERE))
+from more_checks import MoreChecks  # noqa: E402
 CASES = HERE / "test_cases.csv"
 
 
@@ -92,6 +95,7 @@ def main() -> int:
     results_path = Path(sys.argv[2]) if len(sys.argv) > 2 else HERE / "test_results.csv"
     db = str(Path(tempfile.mkdtemp(prefix="rigmind-cases-")) / "rigmind.db")
     cli = Cli(binary, db)
+    more = MoreChecks(binary)  # sign-in, evidence search, chat sessions and the new request rules: several checks per row
 
     summary = {}
     failures = 0
@@ -103,6 +107,17 @@ def main() -> int:
             area = row["area"]
             inp = json.loads(row["input_json"])
             exp = json.loads(row["expected_json"])
+            if area in MoreChecks.AREAS:
+                try:
+                    checks = more.run(area, inp, exp)
+                except Exception as exc:  # a crash in one case must not hide the rest
+                    checks = [("run", False, f"exception: {exc}")]
+                for k, (name, ok, detail) in enumerate(checks, 1):
+                    failures += 0 if ok else 1
+                    counts = summary.setdefault(area, [0, 0])
+                    counts[0 if ok else 1] += 1
+                    writer.writerow([f"{row['case_id']}.{k}", area, "PASS" if ok else "FAIL", ("" if ok else f"{name}: {detail}")[:600]])
+                continue
             try:
                 if area.startswith("alarm_"):
                     passed, detail = check_alarm(cli, inp, exp)
@@ -123,6 +138,7 @@ def main() -> int:
             writer.writerow([row["case_id"], area, status, detail])
 
     cli.close()
+    more.close()
     elapsed = time.time() - started
     for area, (passed, failed) in sorted(summary.items()):
         print(f"{area}: pass={passed} fail={failed}")

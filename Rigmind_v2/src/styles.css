@@ -162,15 +162,15 @@
  --toast-yellow: #ffd60a; --toast-orange: #ff9a3d; --toast-red: #ff5c5c;
  --toast-bg: rgba(22, 41, 74, 0.58); /* the loading-screen navy (#16294A), see-through */
  color-scheme: dark;
- --background: #16191e; --foreground: #eef1f5; --card: #20252c; --card-foreground: #eef1f5;
- --popover: #20252c; --popover-foreground: #eef1f5; --field: #292f37; --border: #3b444e; --input: #3b444e;
- --muted: #292f37; --muted-foreground: #b2becb; --secondary: #292f37; --secondary-foreground: #eef1f5;
- --primary: #78a8e7; --primary-hover: #91b9ee; --primary-foreground: #101b2c; --nav-active: #293b52;
- --accent: #293b52; --accent-foreground: #b3d2fa; --ring: #78a8e7;
- --critical: #ff9e8c; --critical-bg: #462a27; --warning: #f6c170; --warning-bg: #453b29;
- --advisory: #a9c9f4; --advisory-bg: #293b52; --success: #8ed1ac; --success-bg: #273f34;
- --neutral: #d4dce6; --neutral-bg: #292f37; --sidebar: #20252c; --sidebar-foreground: #eef1f5;
- --sidebar-border: #3b444e; --sidebar-accent: #293b52; --sidebar-accent-foreground: #b3d2fa;
+ --background: #0b1626; --foreground: #eaf0f9; --card: #12233d; --card-foreground: #eaf0f9;
+ --popover: #12233d; --popover-foreground: #eaf0f9; --field: #19304f; --border: #2b4468; --input: #2b4468;
+ --muted: #19304f; --muted-foreground: #a9bad2; --secondary: #19304f; --secondary-foreground: #eaf0f9;
+ --primary: #78a8e7; --primary-hover: #91b9ee; --primary-foreground: #0b1626; --nav-active: #1f3a60;
+ --accent: #1f3a60; --accent-foreground: #b3d2fa; --ring: #78a8e7;
+ --critical: #ff9e8c; --critical-bg: #3f2a36; --warning: #f6c170; --warning-bg: #3d3a31;
+ --advisory: #a9c9f4; --advisory-bg: #1f3a60; --success: #8ed1ac; --success-bg: #17382e;
+ --neutral: #d4dce6; --neutral-bg: #19304f; --sidebar: #0f1e35; --sidebar-foreground: #eaf0f9;
+ --sidebar-border: #2b4468; --sidebar-accent: #1f3a60; --sidebar-accent-foreground: #b3d2fa;
  --brand-word: #ffc954; --brand-sub: #e2b500;
 
 }
@@ -181,4 +181,69 @@
 /* Phones: the wordmark carries no trademark mark at any size that fits. */
 @media (max-width: 767px) {
   .tm{display:none}
+}
+
+
+/* ---- rm-motion: slight, smooth movement between states ----------------------------------------------------------------
+   Short eases (150-250 ms) on colour, border, shadow and a tiny lift; pages and panels fade in with a 6 px rise; everything is off
+   for people who ask for reduced motion. Video, canvas and charts are left alone. */
+:root {
+  --rm-ease: cubic-bezier(0.22, 0.61, 0.36, 1);
+  --rm-fast: 150ms;
+  --rm-med: 220ms;
+}
+
+button, a, input, select, textarea, summary, [role="button"], [role="tab"], [role="menuitem"], [role="option"], [role="switch"], [role="checkbox"], label,
+aside nav a, tr, th, td {
+  transition:
+    color var(--rm-fast) var(--rm-ease),
+    background-color var(--rm-fast) var(--rm-ease),
+    border-color var(--rm-fast) var(--rm-ease),
+    box-shadow var(--rm-med) var(--rm-ease),
+    opacity var(--rm-fast) var(--rm-ease),
+    transform var(--rm-fast) var(--rm-ease);
+}
+
+/* a small press and a small lift */
+button:not(:disabled):active, [role="button"]:not([aria-disabled="true"]):active { transform: scale(0.98); }
+.rm-lift { transition: transform var(--rm-med) var(--rm-ease), box-shadow var(--rm-med) var(--rm-ease), border-color var(--rm-fast) var(--rm-ease); }
+a.rm-lift:hover, button.rm-lift:hover { transform: translateY(-1px); }
+
+/* the page that has just been opened */
+@keyframes rm-page-in {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: none; }
+}
+main > * { animation: rm-page-in 240ms var(--rm-ease) both; }
+
+/* panels that open: menus, popovers, dialogs, tooltips, drawers */
+@keyframes rm-pop-in {
+  from { opacity: 0; transform: translateY(4px) scale(0.985); }
+  to { opacity: 1; transform: none; }
+}
+[role="dialog"], [role="menu"], [role="listbox"], [data-radix-popper-content-wrapper] > *, [data-state="open"][data-radix-popper-content-wrapper] {
+  animation: rm-pop-in var(--rm-med) var(--rm-ease) both;
+}
+[data-radix-popper-content-wrapper] { animation: none; } /* the wrapper positions; its child animates */
+
+/* rows and list items that appear (new alert in a list, a chat message) */
+@keyframes rm-row-in {
+  from { opacity: 0; transform: translateY(3px); }
+  to { opacity: 1; transform: none; }
+}
+[role="log"] > *, [role="list"] > [role="listitem"] { animation: rm-row-in var(--rm-med) var(--rm-ease) both; }
+
+/* theme switch: colours glide for a moment (the class is set by the theme toggle, then removed) */
+html.rm-theme-switching, html.rm-theme-switching *:not(video):not(canvas):not(svg *) {
+  transition: background-color 280ms var(--rm-ease), color 280ms var(--rm-ease), border-color 280ms var(--rm-ease), fill 280ms var(--rm-ease), stroke 280ms var(--rm-ease) !important;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  main > *, [role="dialog"], [role="menu"], [role="listbox"], [data-radix-popper-content-wrapper] > *, [role="log"] > *, [role="list"] > [role="listitem"] {
+    animation: none !important;
+  }
+  button, a, input, select, textarea, [role="button"], [role="tab"], tr, th, td, .rm-lift, html.rm-theme-switching, html.rm-theme-switching * {
+    transition: none !important;
+  }
+  button:not(:disabled):active { transform: none; }
 }

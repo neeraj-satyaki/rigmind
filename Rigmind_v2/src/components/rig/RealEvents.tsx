@@ -9,6 +9,8 @@ import { textareaCls } from "./workflow";
 import { useAppState } from "./AppState";
 import { severityTone, type Alert } from "@/data/mock";
 import { loadReview, saveReview } from "@/lib/event-review-store";
+import { factLabels } from "@/lib/alert-text";
+import { AlertDescription } from "./AlertDescription";
 import { clock, dayLabel, localOperator, useRealEvents, type RealEvent } from "@/lib/real-state";
 
 type Review = "In review" | "Acknowledged" | "Closed";
@@ -109,7 +111,7 @@ export function RealEventHistory() {
                   <Chip tone={severityTone(e.severity)}>{e.severity}</Chip>
                 </td>
                 <td className={td}>
-                  {e.condition || "Safety condition"}
+                  {alert ? <AlertDescription alert={alert} /> : e.condition || e.severity}
                   <div className="text-xs text-muted-foreground">{e.camId}</div>
                 </td>
                 <td className={td}>
@@ -236,6 +238,11 @@ export function RealEventInvestigation({ eventId }: { eventId: string }) {
                     <p className="text-xs text-muted-foreground">
                       {t.from} to {t.to}
                     </p>
+                    {(() => {
+                      // The facts that were true at this state change, from the alert metadata the host stored.
+                      const facts = factLabels(alert?.metadata?.states?.find((m) => m.tsMs === t.ms && m.state === t.to)?.facts).join(", ");
+                      return facts ? <p className="text-xs" data-testid="step-facts">{facts}</p> : null;
+                    })()}
                   </div>
                 </div>
               ))}
@@ -303,7 +310,9 @@ export function RealEventInvestigation({ eventId }: { eventId: string }) {
             <CardHead title="Detection context" />
             <div className="px-4 pb-3">
               <Row k="Camera" v={<Mono>{event.camId}</Mono>} />
-              <Row k="Condition" v={event.condition || "Unknown"} />
+              <Row k="Condition" v={alert?.condition || event.condition || "Unknown"} />
+              {alert && <Row k="Description" v={<AlertDescription alert={alert} />} />}
+              {alert?.metadata?.cycle && <Row k="Cycle" v={alert.metadata.cycle} />}
               <Row k="Place" v={event.place || "Unknown"} />
               <Row k="Response" v={alert ? `${alert.status}${alert.owner && alert.owner !== "Unassigned" ? ` by ${alert.owner}` : ""}` : "None recorded"} />
             </div>

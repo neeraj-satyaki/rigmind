@@ -44,8 +44,22 @@ public:
     }
 
     void send(const nlohmann::json& command) override {
+        if (command.value("cmd", std::string()) == "chat") { // a question about evidence: BitNet when installed, else no text
+            if (slm_) slm_->describe(command); // the same single worker queue
+            else on_line_(nlohmann::json{{"ev", "chat"}, {"chatId", command.value("chatId", std::string())}, {"text", nullptr}}.dump());
+            return;
+        }
         if (command.value("cmd", std::string()) == "describe") {
             if (slm_) {
+                // One summary per alert id in flight: a second request while the first waits in the SLM queue is dropped.
+                {
+                    std::lock_guard<std::mutex> lock(flight_mutex_);
+                    const std::string id = command.value("alertId", std::string());
+                    const auto now = std::chrono::steady_clock::now();
+                    const auto it = inflight_.find(id);
+                    if (it != inflight_.end() && now - it->second < std::chrono::minutes(6)) return;
+                    inflight_[id] = now;
+                }
                 nlohmann::json with_scene = command;
                 nlohmann::json scene;
                 const std::string cam = command.value("camId", std::string());
@@ -75,6 +89,16 @@ public:
                                 {"message", "pipeline not running"}}.dump());
     }
 
+    // Called when a "description" line for the alert came back (answer, template or failure): the next request may go.
+    void describe_done(const std::string& alert_id) {
+        std::lock_guard<std::mutex> lock(flight_mutex_);
+        inflight_.erase(alert_id);
+    }
+    bool describe_in_flight(const std::string& alert_id) {
+        std::lock_guard<std::mutex> lock(flight_mutex_);
+        return inflight_.count(alert_id) > 0;
+    }
+
     // Describe commands only reach a model when the SLM runs; otherwise the page keeps the template text.
     bool can_describe() const override { return slm_ != nullptr && slm_->running(); }
 
@@ -84,6 +108,8 @@ private:
     }
     std::mutex scene_mutex_;
     std::map<std::string, nlohmann::json> scenes_;
+    std::mutex flight_mutex_;
+    std::map<std::string, std::chrono::steady_clock::time_point> inflight_;
     PipelineProcess* pipeline_;
     SlmClient* slm_;
     OnLine on_line_;

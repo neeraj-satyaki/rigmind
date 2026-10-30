@@ -17,6 +17,8 @@ import {
 import { Check } from "./workflow";
 import { demoDataEnabled } from "@/lib/demo-mode";
 import { useRealCameras, useStreamSources } from "@/lib/real-state";
+import { isNative } from "@/lib/native-bridge";
+import { StreamVideo } from "./StreamVideo";
 import { recordChange, useRecord } from "@/lib/real-data";
 
 type SavedZone = { name: string; points: [number, number][] };
@@ -25,10 +27,15 @@ export function ZoneEditor() {
   const demo = demoDataEnabled();
   // Sample off: zones are drawn by the user per camera, start empty and are kept in the host's records.
   const zones = useRecord<Record<string, SavedZone>>("zones:v1", {});
-  const realCams = useRealCameras(useStreamSources());
+  const sources = useStreamSources();
+  const realCams = useRealCameras(sources);
+  // Which part of the picture the models' results count for, per camera: the whole picture (default) or only inside the saved zone.
+  const modes = useRecord<Record<string, "frame" | "zone">>("zones:mode:v1", {});
   const [camId, setCamId] = useState("");
   const cam = camId || realCams[0]?.id || "";
+  const uri = cam ? sources[cam] : undefined; // the camera's RTSP address, for the live picture behind the drawing
   const saved = !demo && cam ? zones.value[cam] : undefined;
+  const inferenceMode: "frame" | "zone" = saved && modes.value[cam] === "zone" ? "zone" : "frame";
   const base: [number, number][] = demo ? zoneDefaults.map((p) => [...p]) : [];
   const [points, setPoints] = useState<[number, number][]>(base),
     [selected, setSelected] = useState(0),
@@ -97,7 +104,11 @@ export function ZoneEditor() {
                 }
                 zones.save({ ...zones.value, [cam]: { name: name.trim(), points } });
                 recordChange("rule.draft.save", `zone ${cam}`, `${points.length} vertices`);
-                toast.success("Zone draft saved on this device; detection is unchanged");
+                toast.success(
+                  inferenceMode === "zone"
+                    ? "Zone saved; inference now counts only what is inside it"
+                    : "Zone saved on this device; inference still uses the whole picture until you choose \"Inside this zone only\"",
+                );
               }}
             >
               <Save className="size-4" />
@@ -115,9 +126,12 @@ export function ZoneEditor() {
                 alt="Derrick board simulated camera image"
                 className="h-full w-full object-cover"
               />
+            ) : cam && uri && isNative() ? (
+              // The camera's live picture as it comes in (no detection drawn on it), so the zone can be placed on the real scene.
+              <StreamVideo key={cam} raw camId={cam} uri={uri} />
             ) : (
               <div className="flex h-full w-full items-center justify-center bg-slate text-xs text-slate-foreground/70">
-                {cam ? "No still image from the camera. Draw the zone on this blank frame." : "No data yet. Configure a camera first."}
+                {cam ? "No live picture from the camera. Draw the zone on this blank frame." : "No data yet. Configure a camera first."}
               </div>
             )}
             {demo && overlay && <DetectionOverlay />}
@@ -125,7 +139,7 @@ export function ZoneEditor() {
               ref={svg}
               viewBox="0 0 100 100"
               preserveAspectRatio="none"
-              className="absolute inset-0 h-full w-full touch-none"
+              className="absolute inset-0 z-20 h-full w-full touch-none"
               onPointerMove={(e) => {
                 const index = drag.current;
                 if (index === null) return;
@@ -140,8 +154,8 @@ export function ZoneEditor() {
               }}
               onClick={(e) => {
                 if (mode !== "add") return;
+                // Stay in "Add point" so a zone can be drawn with consecutive clicks; "Select vertex" ends it.
                 setPoints((old) => [...old, pointAt(e.clientX, e.clientY)]);
-                setMode("select");
               }}
             >
               {compare && (
@@ -235,7 +249,7 @@ export function ZoneEditor() {
             </div>
             <span className="absolute bottom-3 left-3 rounded-sm bg-slate px-2 py-1 text-[11px] text-slate-foreground">
               {mode === "add"
-                ? "Choose a point on the image"
+                ? "Click to add points; choose Select vertex when done"
                 : "Select a point to adjust the boundary"}
             </span>
             {demo && (
@@ -269,6 +283,38 @@ export function ZoneEditor() {
               <Check checked={overlay} onChange={setOverlay}>
                 Show detection overlays
               </Check>
+            )}
+            {!demo && cam && (
+              <fieldset className="space-y-1.5" aria-label="Inference area">
+                <legend className="mb-1 text-xs font-medium text-muted-foreground">Inference area</legend>
+                {(
+                  [
+                    ["frame", "Whole camera picture (no zone based inference)"],
+                    ["zone", "Inside this zone only"],
+                  ] as const
+                ).map(([value, label]) => (
+                  <label key={value} className="flex items-start gap-2 text-sm">
+                    <input
+                      type="radio"
+                      name="inference-area"
+                      className="mt-1 accent-primary"
+                      checked={inferenceMode === value}
+                      disabled={value === "zone" && !saved}
+                      onChange={() => {
+                        modes.save({ ...modes.value, [cam]: value });
+                        recordChange("rule.draft.save", `zone ${cam}`, value === "zone" ? "inference inside the zone only" : "inference on the whole picture");
+                        toast.success(value === "zone" ? "Inference limited to the zone" : "Inference uses the whole picture");
+                      }}
+                    />
+                    <span>{label}</span>
+                  </label>
+                ))}
+                <p className="text-[11px] text-muted-foreground">
+                  {saved
+                    ? "Inside the zone, only objects whose centre is in it count for alarms and PPE checks. The platform always counts, as it sets the scale."
+                    : "Save a zone first to limit inference to it."}
+                </p>
+              </fieldset>
             )}
             <Check checked={compare} onChange={setCompare}>
               Compare approved geometry

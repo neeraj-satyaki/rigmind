@@ -32,14 +32,14 @@ vi.mock("@tanstack/react-router", () => ({
 
 import { Notifications } from "@/components/rig/NavTools";
 import { resetAlarmAlerts, startAlarmAlerts } from "@/lib/alarm-alerts";
-import { LOGO_ALERT_MS } from "@/lib/alert-bus";
+import { ALERT_UPDATED, LOGO_ALERT_MS } from "@/lib/alert-bus";
 import { alerts as base } from "@/data/mock";
 
 type Host = { alertId: string; episode: number; phase: string; escalation: number };
 // Host-enriched line (what main.cpp post_line forwards). `host` undefined = plain browser / older host.
 const send = (state: string, cam = "CAM-01", host?: Host) =>
   h.listeners.forEach((l) =>
-    l({ ev: "alarm", cam, state, previous: "x", severity: "s", condition: "Derrickman out of safe zone", place: "Demo rig 01 · Derrick board", frame: 1, ...host }),
+    l({ ev: "alarm", cam, state, previous: "x", severity: "s", condition: `${state} alert`, place: cam, frame: 1, ...host }),
   );
 const step = async (state: string, cam?: string, host?: Host) => {
   await act(async () => {
@@ -104,7 +104,9 @@ describe("alarm episode -> alert bridge", () => {
         expect(h.toasts).toHaveLength(0);
 
         await step("Orange", "CAM-01", host("Orange"));
-        expect(h.toasts.filter((t) => t.endsWith("safety event"))).toHaveLength(1);
+        expect(h.toasts).toHaveLength(1);
+        // host alerts: the title is the neutral level label and the camera; sample-style local ones keep the old title
+        expect(h.toasts[0]).toBe(mode === "host fields" ? "Orange alert · CAM-01" : "Orange · Warning safety event");
         expect(badge()).toBe(String(n0 + 1));
         expect(h.tones).toEqual(["Warning"]);
         expect(rows()).toHaveLength(1);
@@ -117,7 +119,7 @@ describe("alarm episode -> alert bridge", () => {
         expect(bellText()).toContain("Critical");
         expect(h.tones).toEqual(["Warning", "Critical"]);
         expect(h.os).toHaveLength(1);
-        expect(h.calls.filter((c) => c.method === "event.describe")).toHaveLength(1);
+        expect(h.calls.filter((c) => c.method === "event.describe")).toHaveLength(0); // the host asks the SLM itself
 
         await step("Red", "CAM-01", host("Red")); // repeat changes nothing
         expect(badge()).toBe(String(n0 + 2));
@@ -127,12 +129,10 @@ describe("alarm episode -> alert bridge", () => {
         expect(rows()).toHaveLength(1);
         expect(bellText()).toContain("Cleared"); // stays in history, quietly
         expect(badge()).toBe(String(n0 + 2));
-        expect(h.toasts.filter((t) => t.endsWith("safety event"))).toHaveLength(2);
+        expect(h.toasts).toHaveLength(2);
         expect(raises()).toHaveLength(0); // the host already owns the episode row; the page writes none
-        await act(async () => {
-          await vi.advanceTimersByTimeAsync(10);
-        });
-        expect(h.toasts.filter((t) => t.includes("in plain words"))).toHaveLength(1);
+        expect(h.calls.filter((c) => c.method === "event.describe")).toHaveLength(0);
+        expect(bellText()).toContain("Red alert"); // the cleared row keeps its peak label
       });
 
       it("a second episode opens a new item; Yellow->Red skip; cameras are independent", async () => {
@@ -189,7 +189,7 @@ describe("event cycles (host closed field)", () => {
 
   const line = (state: string, alertId: string, closed?: object) =>
     h.listeners.forEach((l) =>
-      l({ ev: "alarm", cam: "CAM-01", state, condition: "Elevator near platform", place: "Demo rig 01 · Derrick board", alertId, phase: "Monitoring", escalation: 0, closed }),
+      l({ ev: "alarm", cam: "CAM-01", state, condition: `${state} alert`, place: "CAM-01", alertId, phase: "Monitoring", escalation: 0, closed }),
     );
   const run = async (fn: () => void) => {
     await act(async () => {
@@ -199,27 +199,29 @@ describe("event cycles (host closed field)", () => {
   };
   const describes = () => h.calls.filter((c) => c.method === "event.describe").map((c) => c.params);
 
-  it("Yellow>Orange>Yellow closes a normal cycle and summarises it; the new Yellow is quiet", async () => {
+  it("Yellow>Orange>Yellow closes a normal cycle (row kept at its peak label); the host writes the summary; the new Yellow is quiet", async () => {
+    const updates: any[] = [];
+    const onUpdate = (e: Event) => updates.push((e as CustomEvent).detail);
+    window.addEventListener(ALERT_UPDATED, onUpdate);
     await run(() => line("Yellow", "ALM-CAM-01-a1"));
     await run(() => line("Orange", "ALM-CAM-01-a1"));
     expect(describes()).toHaveLength(0);
     await run(() => line("Yellow", "ALM-CAM-01-a2", { alertId: "ALM-CAM-01-a1", peak: 1, critical: false, cycle: "Y>O>Y", kind: "normal" }));
-    expect(describes()).toHaveLength(1);
-    expect(describes()[0]).toMatchObject({ alertId: "ALM-CAM-01-a1", severity: "Warning" });
-    expect(describes()[0].condition).toContain("Normal event cycle (Yellow, Orange, Yellow)");
+    expect(describes()).toHaveLength(0); // requested by the host, not by the page
+    // the closed row keeps its peak label (not the Yellow label of the state it fell back to)
+    expect(updates.find((u) => u.id === "ALM-CAM-01-a1")).toMatchObject({ condition: "Orange alert", severity: "Warning", phase: "Cleared", place: "CAM-01" });
     await run(() => line("Yellow", "ALM-CAM-01-a2")); // repeat
-    expect(describes()).toHaveLength(1);
+    expect(describes()).toHaveLength(0);
+    window.removeEventListener(ALERT_UPDATED, onUpdate);
   });
 
-  it("Yellow>Orange>Red>Orange>Yellow closes a critical cycle; Red still describes at once", async () => {
+  it("Yellow>Orange>Red>Orange>Yellow closes a critical cycle", async () => {
     await run(() => line("Orange", "ALM-CAM-01-b1"));
     await run(() => line("Red", "ALM-CAM-01-b1"));
-    expect(describes()).toHaveLength(1); // at the Red moment
+    expect(describes()).toHaveLength(0);
     await run(() => line("Orange", "ALM-CAM-01-b1"));
     await run(() => line("Yellow", "ALM-CAM-01-b2", { alertId: "ALM-CAM-01-b1", peak: 2, critical: true, cycle: "Y>O>R>O>Y", kind: "critical" }));
-    expect(describes()).toHaveLength(2);
-    expect(describes()[1]).toMatchObject({ alertId: "ALM-CAM-01-b1", severity: "Critical" });
-    expect(describes()[1].condition).toContain("Critical event cycle (Yellow, Orange, Red, Orange, Yellow)");
+    expect(describes()).toHaveLength(0);
   });
 
   it("a Yellow-only stretch is cleared without a summary", async () => {

@@ -1,5 +1,11 @@
 #include "bridge.h"
 
+#include <ctime>
+
+#include "evidence_query.h"
+
+#include "backend/alert_metadata.h"
+
 #include <algorithm>
 #include <chrono>
 #include <ctime>
@@ -44,28 +50,10 @@ std::string require_string(const json& p, const char* key, std::size_t max_len) 
 } // namespace
 
 Bridge::Bridge(EventStore& store, StreamSink* stream, AuditLog* audit)
-    : store_(store), stream_(stream), audit_(audit), auth_(store, audit) {}
+    : store_(store), stream_(stream), audit_(audit), auth_(store, audit), chats_(store) {}
 
 void Bridge::audit_event(const std::string& action, const std::string& target, const std::string& detail) {
     if (audit_) audit_->record("backend", action, target, detail, now_ms());
-}
-
-// Plain-language facts for one event: when, where, what, and what the severity means for the supervisor.
-// Built from metadata only. The SLM rewrites this text when it is running; this is the fallback.
-std::string plain_facts(const std::string& severity, const std::string& condition, const std::string& place,
-                        const std::string& cam, std::int64_t ts_ms) {
-    const std::time_t seconds = static_cast<std::time_t>(ts_ms / 1000);
-    const std::tm* local = std::localtime(&seconds);
-    std::ostringstream when;
-    if (local) when << std::put_time(local, "%d %b %Y %H:%M");
-    const char* meaning = severity == "Critical" ? "needs immediate action"
-                          : severity == "Warning" ? "needs attention soon"
-                          : "is for information";
-    std::string text = "At " + when.str() + ", ";
-    text += cam.empty() ? std::string("an event") : "camera " + cam;
-    if (!place.empty()) text += " at " + place;
-    text += " recorded: " + condition + ". This " + severity + " alert " + meaning + ".";
-    return text;
 }
 
 // Trims to at most max_bytes without splitting a UTF-8 sequence.
@@ -137,6 +125,33 @@ json Bridge::simulate(const json& params) {
     return {{"state", to_string(alarm_.current())}, {"alerts", alerts}, {"clipRequested", clip_requested}};
 }
 
+namespace {
+std::int64_t local_midnight_ms(std::int64_t now) {
+    std::time_t t = static_cast<std::time_t>(now / 1000);
+    std::tm tm{};
+#ifdef _WIN32
+    localtime_s(&tm, &t);
+#else
+    localtime_r(&t, &tm);
+#endif
+    tm.tm_hour = tm.tm_min = tm.tm_sec = 0;
+    return static_cast<std::int64_t>(std::mktime(&tm)) * 1000;
+}
+// "30 Oct 14:22" in local time
+std::string local_stamp(std::int64_t ms) {
+    std::time_t t = static_cast<std::time_t>(ms / 1000);
+    std::tm tm{};
+#ifdef _WIN32
+    localtime_s(&tm, &t);
+#else
+    localtime_r(&t, &tm);
+#endif
+    char buf[32];
+    std::strftime(buf, sizeof(buf), "%d %b %H:%M", &tm);
+    return buf;
+}
+} // namespace
+
 bool Bridge::authenticated() const {
     return !auth_required_ || (session_ && session_->expires_ms > now_ms());
 }
@@ -187,30 +202,92 @@ std::string Bridge::handle_impl(const std::string& request_json, bool trusted) {
             session_.reset();
             result = {{"ok", true}};
         } else if (method == "event.describe") {
-            // Metadata -> plain language. Returns the fallback text now; the SLM text arrives later as a
-            // "description" event, keyed by alertId.
+            // The plain-English description of an alert is the SLM's only. The prompt is built here from the metadata the host
+            // stored for the alert id (facts per state change, cycle path, camera) - never from text the page supplies. The
+            // sentence arrives later as a "description" event keyed by alertId; the host stores it on the alert row.
             const std::string alert_id = require_string(params, "alertId", 32);
-            const std::string severity = require_string(params, "severity", 16);
-            const std::string condition = require_string(params, "condition", 128);
-            const std::string place = clip(params.value("place", std::string()), 128);
-            const std::string cam = clip(params.value("camId", std::string()), 32);
+            const json row = store_.find_raised_alert(alert_id);
+            json meta = nullptr;
+            std::string severity = clip(params.value("severity", std::string("Advisory")), 16);
+            std::string label, cam = clip(params.value("camId", std::string()), 32);
+            if (row.is_object()) {
+                if (row["metadata"].is_object()) meta = row["metadata"];
+                severity = row.value("severity", severity);
+                label = row.value("condition", std::string());
+                if (meta.is_object() && !meta.value("camera", std::string()).empty()) cam = clip(meta.value("camera", std::string()), 32);
+                else if (cam.empty()) cam = clip(row.value("place", std::string()), 32);
+            }
             const std::int64_t ts = params.value("tsMs", now_ms());
-            const std::string facts = plain_facts(severity, condition, place, cam, ts);
-            // Prompt contract (checked by tests/slm/prompt_harness.py): the event facts plus what the sentence
-            // must contain. The chat system message (host and harness) fixes the output format.
-            const std::string prompt =
-                "Event: " + facts + "\nWrite one plain sentence for a site supervisor. Name the camera and the place, "
-                "say what happened, and end with the action the supervisor must take (for example check the area, "
-                "stop the work, or confirm that everyone wears the required PPE). When a scene list follows, use only "
-                "what it shows (which things are where and how they moved); never invent anything. No jargon.";
+            const std::string prompt = describe_prompt(meta, severity, label, cam, ts);
             const bool requested = stream_ != nullptr && stream_->can_describe();
             if (requested) {
+                // place = the camera id: the sentence guard (slm_guard) restores the camera name when the model leaves it out.
                 stream_->send({{"cmd", "describe"}, {"alertId", alert_id}, {"prompt", prompt},
-                               {"severity", severity}, {"camId", cam}, {"place", place},
+                               {"severity", severity}, {"camId", cam}, {"place", cam},
                                {"sceneTs", std::max<std::int64_t>(0, params.value("sceneTs", static_cast<std::int64_t>(0)))}});
             }
-            audit_event("event.describe", alert_id, requested ? "slm" : "template");
-            result = {{"alertId", alert_id}, {"text", facts}, {"slm", requested}};
+            if (!requested && row.is_object()) store_.put_alert_summary(alert_id, "", "unavailable", now_ms()); // the UI says "BitNet not available"
+            audit_event("event.describe", alert_id, requested ? "slm" : "unavailable");
+            result = {{"alertId", alert_id}, {"text", nullptr}, {"slm", requested}, {"hasMetadata", meta.is_object()}};
+        // Evidence chat sessions: TOON text, LZ4 compressed, stored in the database (see chat_sessions.h)
+        } else if (method == "chat.save") {
+            if (!params.contains("session") || !params["session"].is_object()) throw std::runtime_error("session is required");
+            result = chats_.save(params["session"], now_ms());
+        } else if (method == "chat.list") {
+            result = chats_.list();
+        } else if (method == "chat.load") {
+            result = chats_.load(require_string(params, "id", 48));
+        } else if (method == "chat.toon") {
+            // The compact TOON text of one session: the cheapest form to put back in front of a model.
+            const std::string chat_id = require_string(params, "id", 48);
+            result = {{"id", chat_id}, {"toon", chats_.toon(chat_id)}};
+        } else if (method == "chat.delete") {
+            const std::string chat_id = require_string(params, "id", 48);
+            chats_.remove(chat_id);
+            audit_event("chat.delete", chat_id, "");
+            result = {{"ok", true}};
+        } else if (method == "evidence.ask") {
+            // Evidence chat. The host finds the matching evidence sets and alerts itself (so finding works without any model) and,
+            // when BitNet is installed, asks it to explain from that data only; the sentence arrives later as a "chat" event.
+            const std::string question = require_string(params, "question", 300);
+            const std::int64_t now = now_ms();
+            const json footage = store_.list_footage(500);
+            std::vector<std::string> cams;
+            for (const json& row : footage) {
+                const std::string cam = row.value("camId", std::string());
+                if (!cam.empty() && std::find(cams.begin(), cams.end(), cam) == cams.end()) cams.push_back(cam);
+            }
+            const EvidenceQuery query = parse_evidence_question(question, now, local_midnight_ms(now), cams);
+            EvidenceQuery every = query;
+            every.limit = 100000;
+            const json total = select_evidence(footage, every, now);
+            const json matches = select_evidence(footage, query, now);
+            const std::string note = describe_matches(matches, query, static_cast<int>(total.size()));
+            std::string evidence_lines, alert_lines;
+            for (const json& m : matches) {
+                evidence_lines += std::string(m.value("kind", std::string("video")) == "image" ? "Orange image set" : "Red video set") + " | " +
+                                  m.value("camId", std::string()) + " | " + local_stamp(m.value("timestampMs", std::int64_t{0})) + " | " +
+                                  std::to_string(m.value("clipCount", 0)) + " files\n";
+            }
+            int alert_count = 0;
+            for (const json& a : store_.list_raised_alerts(200)) {
+                const std::int64_t at = a.value("raisedMs", std::int64_t{0});
+                if (at < query.since_ms || at >= (query.until_ms ? query.until_ms : now + 1)) continue;
+                const std::string id = a.value("id", std::string());
+                if (!query.cam.empty() && id.find(query.cam) == std::string::npos && a.value("place", std::string()).find(query.cam) == std::string::npos) continue;
+                if (++alert_count > 6) break;
+                const std::string summary = clip(a.value("summary", std::string()), 200);
+                alert_lines += id + " | " + a.value("severity", std::string()) + " | " + a.value("phase", std::string()) + " | " + local_stamp(at) + " | " +
+                               (summary.empty() ? std::string("no summary yet") : summary) + "\n";
+            }
+            const std::string chat_id = "chat-" + std::to_string(now) + "-" + std::to_string(next_chat_++);
+            // The model is asked only when there is something for it to explain.
+            const bool slm = stream_ != nullptr && stream_->can_describe() && (!matches.empty() || !alert_lines.empty());
+            // Earlier turns of the same chat reach the prompt as a compact table (a few tokens each).
+            const std::string history = params.contains("history") && params["history"].is_array() ? toon_history(params["history"]) : std::string();
+            if (slm) stream_->send({{"cmd", "chat"}, {"chatId", chat_id}, {"prompt", evidence_chat_prompt(question, note, evidence_lines, alert_lines, 2200, history)}});
+            audit_event("evidence.ask", chat_id, clip(question, 160) + " | " + std::to_string(matches.size()) + " matches" + (slm ? " | asked BitNet" : ""));
+            result = {{"chatId", chat_id}, {"matches", matches}, {"note", note}, {"slm", slm}};
         } else if (method == "footage.list") {
             result = store_.list_footage(std::clamp(params.value("limit", 50), 1, 500));
         } else if (method == "footage.files") {
@@ -265,6 +342,9 @@ std::string Bridge::handle_impl(const std::string& request_json, bool trusted) {
             result = {{"id", params.at("id")}, {"status", status}};
         } else if (method == "alerts.list") {
             result = store_.list_alerts();
+        } else if (method == "alert.get") {
+            // One alert row with its metadata (facts) and summary; null when the id is unknown.
+            result = store_.find_raised_alert(require_string(params, "id", 32));
         } else if (method == "alerts.feed") {
             // Raised alerts with status and owner; the UI polls this for the live alert list.
             result = store_.list_raised_alerts(std::clamp(params.value("limit", 100), 1, 500));
@@ -285,8 +365,10 @@ std::string Bridge::handle_impl(const std::string& request_json, bool trusted) {
             result = {{"accepted", true}};
         } else if (method == "stream.offer") {
             if (!stream_) throw std::runtime_error("stream pipeline not available");
+            // profile: "small" (640x360, low bitrate: dashboard tiles) or "full" (1280x720, the Live view); anything else is "full"
+            const std::string profile = params.value("profile", std::string("full")) == "small" ? "small" : "full";
             stream_->send({{"cmd", "offer"}, {"cam", require_string(params, "cam", 32)},
-                           {"sdp", require_string(params, "sdp", 16384)}});
+                           {"sdp", require_string(params, "sdp", 16384)}, {"profile", profile}});
             result = {{"accepted", true}};
         } else if (method == "stream.detach") {
             // The viewer left the Live page. The camera keeps recording and raising alarms.
@@ -319,7 +401,9 @@ std::string Bridge::handle_impl(const std::string& request_json, bool trusted) {
             const auto value = store_.get_record(require_string(params, "key", 256));
             result = value ? json::parse(*value) : json(nullptr);
         } else if (method == "records.set") {
-            store_.put_record(require_string(params, "key", 256), params.at("value").dump());
+            const std::string record_key = require_string(params, "key", 256);
+            store_.put_record(record_key, params.at("value").dump());
+            if (record_hook_) record_hook_(record_key);
             result = {{"ok", true}};
         } else if (method == "records.list") {
             result = store_.list_records(params.value("prefix", std::string()));

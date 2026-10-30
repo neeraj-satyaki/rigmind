@@ -4,6 +4,7 @@
 
 #include "pipeline/bytetrack.h"
 #include "pipeline/ews_facts.h"
+#include "pipeline/mask_stabilizer.h"
 #include "pipeline/ppe_check.h"
 #include "pipeline/platform_overlay.h"
 
@@ -23,6 +24,7 @@
 #include <map>
 #include <optional>
 #include <regex>
+#include <set>
 #include <sstream>
 #include <stdexcept>
 #include <tuple>
@@ -453,22 +455,27 @@ private:
 // ---- Inference ------------------------------------------------------------------------------------------------------
 constexpr int kHeldDrawFrames = 3; // a lost PPE track is drawn (dashed) for this many frames only
 
+// Rate counters of one model for one camera ("inference" event window) and the IDSS scale in use for that camera.
+struct CamStat {
+    std::uint64_t count = 0, total_us = 0;
+    std::chrono::steady_clock::time_point window_start = std::chrono::steady_clock::now();
+    float scale = 0;
+    std::string scale_mode; // IDSS only
+};
+
 struct Inference::Worker {
     std::string model;
     std::chrono::milliseconds min_interval;
     int threads;
     std::thread thread;
-    std::atomic<std::uint64_t> count{0}, total_us{0};
-    std::chrono::steady_clock::time_point window_start = std::chrono::steady_clock::now();
-    std::mutex mutex; // guards `settings` (read by take_stats)
+    std::mutex mutex; // guards `settings` and `cams` (read by take_stats)
+    std::map<std::string, CamStat> cams;
+    std::set<std::string> pending_cams; // cameras with a handed-over frame whose result is not published yet (Inference::mutex_)
     Settings settings;
     bool running = false;
     int dumped = 0;
     std::atomic<bool> loaded{false};
     std::atomic<bool> warm{false};    // first frame done (the first run on a GPU takes seconds): only then does the overlay wait for it
-    std::atomic<bool> pending{false}; // a frame was handed over and its result is not published yet
-    float scale = 0;
-    std::string scale_mode; // IDSS only
     std::string provider = "cpu", provider_note;
     double load_seconds = 0;
 };
@@ -488,6 +495,24 @@ struct FactsDiag {
                            f.platform_elevator_collision, f.derrickman_out_of_safe_zone, f.machine_past_right_edge, f.link_tilt_near_derrickman};
         for (int i = 0; i < 9; ++i) c[i] += v[i] ? 1 : 0;
     }
+};
+
+// Everything the workers remember between frames, for ONE camera: trackers, ROI, scale selection, PPE check, diagnostics.
+// A worker creates one on the first frame of a camera, so two cameras never share a track, a hold counter or a debounce.
+struct CamState {
+    MaskStabilizer item_stabilizer;     // IDSS masks and boxes as drawn on the video (display only)
+    MaskStabilizer platform_stabilizer; // the platform overlay as drawn
+    RoiConfig roi_cfg;
+    FactsDiag diag;
+    RoiState roi_state; // IDSS only
+    ScaleSelector scale_selector;
+    ScaleSelector threshold_selector; // decides the EWS threshold set from the Platform width, even when the mask scale is pinned
+    ByteTracker ppe_tracker, person_tracker;
+    PpeChecker ppe_checker;
+    struct PpeWindow {
+        std::chrono::steady_clock::time_point last = std::chrono::steady_clock::now();
+        std::uint64_t track_us = 0, track_n = 0;
+    } ppe_window;
 };
 } // namespace
 
@@ -520,16 +545,15 @@ void Inference::start() {
 }
 
 void Inference::push_frame(std::shared_ptr<const Frame> frame) {
+    const std::string cam = frame->cam;
     {
         std::lock_guard<std::mutex> lock(draw_mutex_);
-        arrivals_.emplace_back(frame->pts_key, std::chrono::steady_clock::now());
-        if (arrivals_.size() > 32) arrivals_.erase(arrivals_.begin());
+        history_.arrived(cam, frame->pts_key, std::chrono::steady_clock::now());
     }
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        latest_ = std::move(frame);
-        ++sequence_;
-        for (auto& worker : workers_) worker->pending = true;
+        slots_.put(cam, std::move(frame)); // replaces this camera's older frame only
+        for (auto& worker : workers_) worker->pending_cams.insert(cam);
     }
     wake_.notify_all();
 }
@@ -537,18 +561,26 @@ void Inference::push_frame(std::shared_ptr<const Frame> frame) {
 void Inference::publish(DrawResult result) {
     {
         std::lock_guard<std::mutex> lock(draw_mutex_);
-        auto& history = history_[result.model == "idss" ? 1 : 0];
-        history.push_back(std::move(result));
-        if (history.size() > 8) history.erase(history.begin());
+        history_.publish(std::move(result));
     }
     draw_cv_.notify_all();
 }
 
-bool Inference::ready_for_frame() const {
+bool Inference::ready_for_frame(const std::string& cam) const {
     const bool wanted[2] = {overlay_ppe_.load(), overlay_idss_.load()};
-    for (int m = 0; m < 2; ++m)
-        if (wanted[m] && workers_[static_cast<std::size_t>(m)]->warm.load() && workers_[static_cast<std::size_t>(m)]->pending.load()) return false;
+    std::lock_guard<std::mutex> lock(mutex_);
+    for (int m = 0; m < 2; ++m) {
+        const Worker& w = *workers_[static_cast<std::size_t>(m)];
+        if (wanted[m] && w.warm.load() && w.pending_cams.count(cam)) return false;
+    }
     return true;
+}
+
+Inference::SceneSlot& Inference::scene_for(const std::string& cam) {
+    std::lock_guard<std::mutex> lock(scene_mutex_);
+    auto& slot = scene_[cam];
+    if (!slot) slot = std::make_unique<SceneSlot>();
+    return *slot;
 }
 
 nlohmann::json Inference::take_sync() {
@@ -574,47 +606,23 @@ nlohmann::json Inference::take_sync() {
 // A result older than this many frames is not drawn on a newer frame: no box is better than a box that lags the person.
 constexpr int kMaxStaleFrames = 2;
 
-std::vector<DrawResult> Inference::collect(std::int64_t key, std::chrono::milliseconds budget) {
+std::vector<DrawResult> Inference::collect(const std::string& cam, std::int64_t key, std::chrono::milliseconds budget) {
     std::unique_lock<std::mutex> lock(draw_mutex_);
     auto deadline = std::chrono::steady_clock::now() + budget;
-    for (const auto& arrival : arrivals_) {
-        if (arrival.first == key) deadline = arrival.second + budget;
-    }
+    if (const auto arrived = history_.arrival(cam, key)) deadline = *arrived + budget;
     const bool wanted[2] = {overlay_ppe_.load(), overlay_idss_.load()};
     bool loaded[2] = {false, false};
     for (int m = 0; m < 2; ++m) loaded[m] = workers_[m]->warm.load();
-    auto exact = [&](int m) {
-        for (const DrawResult& r : history_[m])
-            if (r.key == key) return true;
-        return false;
-    };
     draw_cv_.wait_until(lock, deadline, [&] {
         for (int m = 0; m < 2; ++m)
-            if (wanted[m] && loaded[m] && !exact(m)) return false;
+            if (wanted[m] && loaded[m] && !history_.exact(m, cam, key)) return false;
         return true;
     });
-    // Position of a frame in the recent arrival list: frame distance between two keys.
-    auto index_of = [&](std::int64_t k) -> int {
-        for (std::size_t i = 0; i < arrivals_.size(); ++i)
-            if (arrivals_[i].first == k) return static_cast<int>(i);
-        return -1;
-    };
-    const int cur_index = index_of(key);
+    const int cur_index = history_.index_of(cam, key);
     std::vector<DrawResult> out;
     for (int m = 0; m < 2; ++m) {
         if (!wanted[m]) continue;
-        const DrawResult* pick = nullptr;
-        for (const DrawResult& r : history_[m]) {
-            if (r.key == key) {
-                pick = &r;
-                break;
-            }
-            if (r.key < key && key - r.key < 400000000LL) { // newest earlier one, if it is at most kMaxStaleFrames frames old
-                const int idx = index_of(r.key);
-                const int lag = (cur_index >= 0 && idx >= 0) ? cur_index - idx : 99;
-                if (lag <= kMaxStaleFrames) pick = &r;
-            }
-        }
+        const DrawResult* pick = history_.pick(m, cam, key, kMaxStaleFrames);
         if (loaded[m]) {
             SyncWindow& w = sync_[m];
             ++w.n;
@@ -625,7 +633,7 @@ std::vector<DrawResult> Inference::collect(std::int64_t key, std::chrono::millis
                 w.frames.push_back(0);
                 w.ms.push_back(0);
             } else {
-                const int idx = index_of(pick->key);
+                const int idx = history_.index_of(cam, pick->key);
                 w.frames.push_back((cur_index >= 0 && idx >= 0) ? cur_index - idx : 99);
                 w.ms.push_back(static_cast<double>(key - pick->key) / 1e6);
             }
@@ -635,47 +643,47 @@ std::vector<DrawResult> Inference::collect(std::int64_t key, std::chrono::millis
     return out;
 }
 
-std::shared_ptr<const Frame> Inference::latest_annotated(std::vector<DrawResult>& results) {
+std::shared_ptr<const Frame> Inference::latest_annotated(std::vector<DrawResult>& results, const std::string& cam) {
     std::shared_ptr<const Frame> frame;
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        frame = latest_;
+        frame = slots_.latest(cam);
     }
     results.clear();
     if (!frame) return nullptr;
     const bool wanted[2] = {overlay_ppe_.load(), overlay_idss_.load()};
     std::lock_guard<std::mutex> lock(draw_mutex_);
     for (int m = 0; m < 2; ++m) {
-        if (!wanted[m] || history_[m].empty()) continue;
-        const DrawResult& newest = history_[m].back();
-        const std::int64_t gap = frame->pts_key >= 0 ? frame->pts_key - newest.key : 0;
-        if (gap < 1000000000LL && gap > -1000000000LL) results.push_back(newest); // within a second of the frame
+        const DrawResult* newest = wanted[m] ? history_.newest(m, frame->cam) : nullptr;
+        if (!newest) continue;
+        const std::int64_t gap = frame->pts_key >= 0 ? frame->pts_key - newest->key : 0;
+        if (gap < 1000000000LL && gap > -1000000000LL) results.push_back(*newest); // within a second of the frame
     }
     return frame;
 }
 
-std::vector<ModelStats> Inference::take_stats() {
+std::vector<ModelStats> Inference::take_stats(const std::string& cam) {
     std::vector<ModelStats> out;
     const auto now = std::chrono::steady_clock::now();
     for (auto& worker : workers_) {
         ModelStats s;
         s.model = worker->model;
-        const double seconds = std::max(0.001, std::chrono::duration<double>(now - worker->window_start).count());
-        const std::uint64_t count = worker->count.exchange(0), total_us = worker->total_us.exchange(0);
-        worker->window_start = now;
+        std::lock_guard<std::mutex> lock(worker->mutex);
+        CamStat& stat = worker->cams[cam];
+        const double seconds = std::max(0.001, std::chrono::duration<double>(now - stat.window_start).count());
+        const std::uint64_t count = stat.count, total_us = stat.total_us;
+        stat.count = stat.total_us = 0;
+        stat.window_start = now;
         s.fps = count / seconds;
         s.avg_ms = count ? total_us / 1000.0 / count : 0;
-        {
-            std::lock_guard<std::mutex> lock(worker->mutex);
-            s.conf = worker->settings.conf;
-            s.iou = worker->settings.iou;
-            s.running = worker->running;
-            s.provider = worker->provider;
-            s.provider_note = worker->provider_note;
-            s.load_seconds = worker->load_seconds;
-            s.scale = worker->scale;
-            s.scale_mode = worker->scale_mode;
-        }
+        s.conf = worker->settings.conf;
+        s.iou = worker->settings.iou;
+        s.running = worker->running;
+        s.provider = worker->provider;
+        s.provider_note = worker->provider_note;
+        s.load_seconds = worker->load_seconds;
+        s.scale = stat.scale;
+        s.scale_mode = stat.scale_mode;
         out.push_back(s);
     }
     return out;
@@ -688,20 +696,11 @@ void Inference::run(Worker& worker) {
     const fs::path cfg_file = dir_ / "inference.cfg";
     std::unique_ptr<Detector> detector;
     Settings settings;
-    RoiConfig roi_cfg;
-    FactsDiag diag;
-    RoiState roi_state; // IDSS only
+    RoiConfig roi_base; // configuration shared by every camera; each camera state holds its own copy (the scale is per camera)
     AutoScaleConfig scale_cfg;
-    ScaleSelector scale_selector;
     TrackConfig track_cfg;
     PpeCheckConfig ppe_cfg;
-    ByteTracker ppe_tracker, person_tracker;
-    PpeChecker ppe_checker;
-    struct PpeWindow {
-        std::chrono::steady_clock::time_point last = std::chrono::steady_clock::now();
-        std::uint64_t track_us = 0, track_n = 0;
-    } ppe_window;
-    ScaleSelector threshold_selector; // decides the EWS threshold set from the Platform width, even when the mask scale is pinned
+    std::map<std::string, CamState> states; // per camera, created on the camera's first frame
     fs::file_time_type cfg_time{};
     try {
         const json cfg = load_inference_cfg(cfg_file);
@@ -709,11 +708,10 @@ void Inference::run(Worker& worker) {
         const json model = model_settings(cfg, worker.model);
         if (model.is_null()) throw std::runtime_error("no settings for model " + worker.model);
         settings = parse_settings(model);
-        roi_cfg = parse_roi(cfg);
+        roi_base = parse_roi(cfg);
         scale_cfg = parse_auto_scale(cfg);
         track_cfg = parse_tracking(cfg);
         ppe_cfg = parse_ppe_check(cfg);
-        ppe_checker.configure(ppe_cfg);
         detector = std::make_unique<Detector>(dir_ / fs::u8path(settings.file), worker.threads, cache_dir_);
     } catch (const std::exception& e) {
         emit_({{"ev", "error"}, {"message", "inference " + worker.model + ": " + e.what()}});
@@ -729,21 +727,25 @@ void Inference::run(Worker& worker) {
         worker.loaded = true;
     }
 
-    std::uint64_t seen = 0;
+    FrameSlots<Frame>::Cursor cursor;
     auto next_allowed = std::chrono::steady_clock::now();
     auto next_cfg_check = next_allowed + std::chrono::seconds(2);
     while (true) {
         std::shared_ptr<const Frame> frame;
+        std::uint64_t seen = 0; // sequence of the taken frame within its camera's slot
         {
             std::unique_lock<std::mutex> lock(mutex_);
-            wake_.wait(lock, [&] { return stopping_ || sequence_ != seen; });
+            wake_.wait(lock, [&] { return stopping_ || slots_.has_unseen(cursor); });
             if (stopping_) return;
-            // A fresh frame is waiting: hold it back until this model's rate allows another run, then take the newest.
+            // A fresh frame is waiting: hold it back until this model's rate allows another run, then take the newest frame of the
+            // next camera in line (round robin: every camera gets turns even when this model cannot keep up with all of them).
             wake_.wait_until(lock, next_allowed, [&] { return stopping_; });
             if (stopping_) return;
-            frame = latest_;
-            seen = sequence_;
+            const auto taken = slots_.take(cursor);
+            frame = taken.frame;
+            seen = taken.seq;
         }
+        if (!frame) continue;
         const auto started = std::chrono::steady_clock::now();
         next_allowed = started + worker.min_interval;
 
@@ -756,11 +758,14 @@ void Inference::run(Worker& worker) {
                     cfg_time = stamp;
                     const json reloaded = load_inference_cfg(cfg_file);
                     const json model = model_settings(reloaded, worker.model);
-                    roi_cfg = parse_roi(reloaded);
+                    roi_base = parse_roi(reloaded);
                     scale_cfg = parse_auto_scale(reloaded);
                     track_cfg = parse_tracking(reloaded);
                     ppe_cfg = parse_ppe_check(reloaded);
-                    ppe_checker.configure(ppe_cfg);
+                    for (auto& entry : states) { // a configuration change applies to every camera
+                        entry.second.roi_cfg = roi_base;
+                        entry.second.ppe_checker.configure(ppe_cfg);
+                    }
                     if (!model.is_null()) {
                         const Settings next = parse_settings(model);
                         settings.conf = next.conf;
@@ -777,6 +782,23 @@ void Inference::run(Worker& worker) {
             }
         }
 
+        auto state_at = states.find(frame->cam);
+        if (state_at == states.end()) {
+            state_at = states.emplace(frame->cam, CamState{}).first;
+            state_at->second.roi_cfg = roi_base;
+            state_at->second.ppe_checker.configure(ppe_cfg);
+        }
+        CamState& cs = state_at->second;
+        RoiConfig& roi_cfg = cs.roi_cfg;
+        FactsDiag& diag = cs.diag;
+        RoiState& roi_state = cs.roi_state;
+        ScaleSelector& scale_selector = cs.scale_selector;
+        ScaleSelector& threshold_selector = cs.threshold_selector;
+        ByteTracker& ppe_tracker = cs.ppe_tracker;
+        ByteTracker& person_tracker = cs.person_tracker;
+        PpeChecker& ppe_checker = cs.ppe_checker;
+        auto& ppe_window = cs.ppe_window;
+
         std::vector<Detection> found;
         try {
             // PPE with tracking: the model runs down to low_thresh so ByteTrack's second stage sees the weak boxes.
@@ -784,7 +806,10 @@ void Inference::run(Worker& worker) {
             if (worker.model == "ppe" && track_cfg.enabled) run_settings.conf = std::min(settings.conf, track_cfg.low_thresh);
             found = detector->detect(*frame, run_settings, settings.imgsz);
         } catch (const std::exception& e) {
-            worker.pending = false;
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                worker.pending_cams.erase(frame->cam);
+            }
             emit_({{"ev", "error"}, {"message", "inference " + worker.model + ": " + e.what()}});
             std::this_thread::sleep_for(std::chrono::seconds(1));
             continue;
@@ -801,8 +826,12 @@ void Inference::run(Worker& worker) {
         // never freezes the video or stops monitoring).
         if (const char* delay = std::getenv("RIGMIND_TEST_INFER_DELAY_MS")) std::this_thread::sleep_for(std::chrono::milliseconds(std::atoi(delay)));
         const auto elapsed_us = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - started).count();
-        worker.count.fetch_add(1);
-        worker.total_us.fetch_add(static_cast<std::uint64_t>(elapsed_us));
+        {
+            std::lock_guard<std::mutex> lock(worker.mutex);
+            CamStat& stat = worker.cams[frame->cam];
+            ++stat.count;
+            stat.total_us += static_cast<std::uint64_t>(elapsed_us);
+        }
 
         // PPE: ByteTrack over the detections (display, the detections event and the presence check all use its output).
         if (worker.model == "ppe") {
@@ -838,7 +867,14 @@ void Inference::run(Worker& worker) {
         const bool is_idss = worker.model == "idss";
         std::optional<Box> roi;
         std::vector<NamedBox> named;
+        // Zone based inference: objects outside the camera's zone do not reach the alarm facts, the person tracking or the PPE check
+        // (they are still drawn, dimmed, as outside). The platform always counts.
+        const Zone zone = zones_.get(frame->cam);
+        const auto in_zone = [&](const Detection& d) {
+            return !zone.enabled || same_name(detector->label(d.cls), "platform") || box_in_zone(zone, d.box[0], d.box[1], d.box[2], d.box[3], frame->width, frame->height);
+        };
         for (const Detection& d : found) {
+            if (!in_zone(d)) continue;
             NamedBox nb{detector->label(d.cls), d.conf, {d.box[0], d.box[1], d.box[2], d.box[3]}, {}};
             // The collision rule needs the Platform and Elevator outlines (IDSS tests mask contour points).
             if (is_idss && !d.mask.empty() && (same_name(nb.label, "platform") || same_name(nb.label, "elevators") || same_name(nb.label, "elevator"))) {
@@ -862,9 +898,9 @@ void Inference::run(Worker& worker) {
                 for (const TrackDet& d : person_dets) people.push_back({++index, d.box});
             }
             std::lock_guard<std::mutex> lock(persons_mutex_);
-            persons_ = std::move(people);
-            persons_ts_ = frame->ts_ms;
-            persons_cam_ = frame->cam;
+            PersonsSlot& slot = persons_[frame->cam];
+            slot.persons = std::move(people);
+            slot.ts = frame->ts_ms;
         }
         if (is_idss) {
             // One scale for the ROI and the platform overlay: pinned by auto_scale.force, or from the Platform's width.
@@ -883,8 +919,9 @@ void Inference::run(Worker& worker) {
             threshold_cfg.force.clear();
             threshold_selector.update(platform_fraction, threshold_cfg);
             std::lock_guard<std::mutex> lock(worker.mutex);
-            worker.scale = roi_cfg.scale;
-            worker.scale_mode = scale_selector.mode();
+            CamStat& stat = worker.cams[frame->cam];
+            stat.scale = roi_cfg.scale;
+            stat.scale_mode = scale_selector.mode();
         }
         if (is_idss && roi_cfg.enabled) {
             roi = update_roi(roi_state, compute_platform_roi(named, roi_cfg, frame->width, frame->height), roi_cfg);
@@ -898,7 +935,7 @@ void Inference::run(Worker& worker) {
             const FrameFacts fed = derive_facts_with_roi(named, roi, roi_cfg, thresholds, &detail_all);
             const FrameFacts all = derive_facts(named, thresholds);                                      // diagnostic: no ROI at all
             const FrameFacts old_roi = derive_facts(filter_detections(named, roi, roi_cfg), thresholds); // diagnostic: ROI on every rule (previous behaviour)
-            if (facts_) facts_(fed, zoomed);
+            if (facts_) facts_(frame->cam, fed, zoomed);
             // Low-rate diagnostic ("facts", ~2 Hz): the facts the EWS sees (ROI applied) and the same without ROI, with
             // the percentage of frames in the last window on which each was true.
             ++diag.frames;
@@ -930,6 +967,7 @@ void Inference::run(Worker& worker) {
         std::vector<SceneObs> scene_obs;
         DrawResult draw;
         draw.model = worker.model;
+        draw.cam = frame->cam;
         draw.key = frame->pts_key;
         const Detection* platform = nullptr; // the Platform the overlay is drawn for: highest confidence
         for (const Detection& d : found) {
@@ -961,6 +999,11 @@ void Inference::run(Worker& worker) {
                 item["in_roi"] = !roi || box_centroid_in(b, *roi) || same_name(detector->label(d.cls), roi_cfg.reference_class);
                 draw_item.in_roi = item["in_roi"].get<bool>();
             }
+            if (zone.enabled) {
+                const bool inside = in_zone(d);
+                item["in_zone"] = inside;
+                if (!inside) draw_item.in_roi = false; // drawn like an object outside the region of interest
+            }
             if (worker.model == "ppe" && track_cfg.enabled) {
                 item["track_id"] = d.track_id;
                 if (d.held) item["held"] = true;
@@ -977,11 +1020,12 @@ void Inference::run(Worker& worker) {
             items.push_back(item);
         }
         // Scene memory for the plain-language summaries: positions, mask outlines and centroid paths of every class.
-        scene_.update(worker.model, frame->ts_ms, scene_obs);
         {
-            std::int64_t due = scene_emit_ms_.load();
-            if (frame->ts_ms - due >= 1000 && scene_emit_ms_.compare_exchange_strong(due, frame->ts_ms))
-                emit_(scene_.snapshot(frame->cam, frame->ts_ms, frame->width, frame->height));
+            SceneSlot& scene = scene_for(frame->cam);
+            scene.trail.update(worker.model, frame->ts_ms, scene_obs);
+            std::int64_t due = scene.emit_ms.load();
+            if (frame->ts_ms - due >= 1000 && scene.emit_ms.compare_exchange_strong(due, frame->ts_ms))
+                emit_(scene.trail.snapshot(frame->cam, frame->ts_ms, frame->width, frame->height));
         }
         json event = {{"ev", "detections"}, {"cam", frame->cam}, {"model", worker.model}, {"ts", frame->ts_ms},
                       {"pts_ms", frame->pts_ms}, {"rtp", frame->rtp}, {"latency_ms", wall_ms() - frame->ts_ms}, {"w", frame->width}, {"h", frame->height}, {"ms", std::round(elapsed_us / 100.0) / 10.0}, {"items", items}};
@@ -1012,6 +1056,26 @@ void Inference::run(Worker& worker) {
                 event["platform"] = {{"box", {overlay.box.x, overlay.box.y, overlay.box.x + overlay.box.width, overlay.box.y + overlay.box.height}},
                                      {"outline", outline}};
             }
+            // Display only: hold a mask for half a second when the model drops it and ease outlines between frames, so the burned-in
+            // masks do not blink or shimmer. The alarm facts, the tracking and the events above use the raw detections.
+            {
+                draw.items = cs.item_stabilizer.update(frame->ts_ms, draw.items, frame->width);
+                DrawItem shown;
+                shown.label = "platform-overlay";
+                if (draw.has_platform) {
+                    shown.box[0] = draw.platform_box[0]; shown.box[1] = draw.platform_box[1];
+                    shown.box[2] = draw.platform_box[2]; shown.box[3] = draw.platform_box[3];
+                    if (!draw.outline.empty()) shown.polygon = *std::max_element(draw.outline.begin(), draw.outline.end(),
+                        [](const std::vector<DrawPoint>& a, const std::vector<DrawPoint>& b) { return a.size() < b.size(); });
+                }
+                const auto stable = cs.platform_stabilizer.update(frame->ts_ms, draw.has_platform ? std::vector<DrawItem>{shown} : std::vector<DrawItem>{}, frame->width);
+                if (!stable.empty()) {
+                    draw.has_platform = true;
+                    for (int k = 0; k < 4; ++k) draw.platform_box[k] = stable[0].box[k];
+                    draw.outline.clear();
+                    if (!stable[0].polygon.empty()) draw.outline.push_back(stable[0].polygon);
+                }
+            }
             if (roi) {
                 draw.has_roi = true;
                 draw.roi[0] = static_cast<int>(std::lround(roi->x1));
@@ -1023,12 +1087,14 @@ void Inference::run(Worker& worker) {
         }
         if (worker.model == "ppe" && ppe_cfg.enabled) {
             std::vector<NamedBox> present;
-            for (const Detection& d : found) present.push_back({detector->label(d.cls), d.conf, {d.box[0], d.box[1], d.box[2], d.box[3]}, {}});
+            for (const Detection& d : found)
+                if (in_zone(d)) present.push_back({detector->label(d.cls), d.conf, {d.box[0], d.box[1], d.box[2], d.box[3]}, {}});
             std::vector<PpePerson> people;
             {
                 std::lock_guard<std::mutex> lock(persons_mutex_);
                 // Person boxes older than 1 s are not used: no person visible means no evaluation.
-                if (persons_cam_ == frame->cam && std::llabs(frame->ts_ms - persons_ts_) < 1000) people = persons_;
+                const auto slot = persons_.find(frame->cam);
+                if (slot != persons_.end() && std::llabs(frame->ts_ms - slot->second.ts) < 1000) people = slot->second.persons;
             }
             if (const auto change = ppe_checker.update(frame->ts_ms, people, present)) {
                 emit_({{"ev", "ppe"}, {"cam", frame->cam}, {"state", change->state}, {"missing", change->missing},
@@ -1057,7 +1123,7 @@ void Inference::run(Worker& worker) {
         worker.warm = true;
         {
             std::lock_guard<std::mutex> lock(mutex_);
-            if (sequence_ == seen) worker.pending = false; // no newer frame was handed over meanwhile
+            if (slots_.seq(frame->cam) == seen) worker.pending_cams.erase(frame->cam); // no newer frame of this camera meanwhile
         }
         emit_(event);
     }

@@ -28,12 +28,16 @@ namespace rigmind {
 // writes nothing. A new episode after None opens a new alert id.
 //
 // handle() returns the event enriched with:
+//   condition   neutral level label ("Yellow monitoring" | "Orange alert" | "Red alert"); place = the camera id. The alert row
+//               keeps the label of the peak level, also after the cycle closes. No sentence about what happened is stored:
+//               the facts go to alert_metadata (cycle path and, per state change, the EWS facts true at that moment).
 //   alertId     "ALM-<cam>-<boot><n>" (32 chars max, stable for the episode, unique across restarts)
 //   episode     n (per camera, starts at 1 after each restart)
 //   phase       "Monitoring" | "Escalated" | "Cleared"
 //   escalation  0 Yellow, 1 Orange, 2 Red (level of the current state)
 //   peak        highest escalation level reached in the episode
 //   changed     true when this line was a transition that was recorded
+//   peakRaised  true when this line raised the episode's peak level (first Orange, first Red)
 // A None line for a camera that never had an episode is returned unchanged (no alertId).
 // Thread-safe: called from the pipeline reader thread.
 class AlarmRecorder {
@@ -44,6 +48,10 @@ public:
 
     nlohmann::json handle(const nlohmann::json& event, std::int64_t now_ms);
 
+    // The pipeline's {"ev":"facts"} line (about 2 Hz per camera). The latest one per camera is attached, as a snapshot of the EWS
+    // facts, to every state change that follows (alert metadata, see alert_metadata.h). Thread-safe.
+    void note_facts(const nlohmann::json& facts_event, std::int64_t now_ms);
+
     const std::string& boot() const { return boot_; }
 
 private:
@@ -53,8 +61,11 @@ private:
         int peak = -1;            // -1 none, 0 Yellow, 1 Orange, 2 Red
         std::string path;         // states of the open cycle, e.g. "Y>O>R>O"
         std::string alert_id;
-        std::string condition;
-        std::string place;
+        nlohmann::json meta;      // metadata of the open cycle (facts only)
+    };
+    struct Facts {
+        nlohmann::json facts;
+        std::int64_t at_ms = 0;
     };
 
     std::string make_alert_id(const std::string& cam, int episode) const;
@@ -64,13 +75,15 @@ private:
     std::string boot_;
     std::mutex mutex_;
     std::map<std::string, Camera> cameras_;
+    std::map<std::string, Facts> facts_;
 };
 
 // PPE compliance episodes ({"ev":"ppe"} lines from the pipeline: state "missing" with the items not detected, or "ok").
 // One alerts row per episode, Advisory severity, status Open while something is missing and Cleared afterwards. The row
 // is updated in place when the missing set changes. Each raise, update and clear writes one audit row ('ppe.transition').
 // handle() returns the event enriched with alertId ("PPE-<cam>-<boot><n>"), episode, phase ("Open" | "Cleared"),
-// condition ("PPE not detected: vest, gloves"), severity and changed. A repeat with the same missing set changes
+// condition ("PPE items not detected"), severity, action ("raised" | "updated" | "cleared") and changed. The metadata row holds
+// {kind:"ppe", camera, missing:[...], persons, since_ms}. A repeat with the same missing set changes
 // nothing; an "ok" with no open episode is returned unchanged. Thread-safe.
 class PpeRecorder {
 public:
@@ -82,7 +95,8 @@ private:
         bool open = false;
         int episode = 0;
         int persons = 0;
-        std::string alert_id, condition;
+        std::string alert_id;
+        std::int64_t since_ms = 0;
         std::vector<std::string> missing;
     };
     EventStore& store_;

@@ -1,4 +1,5 @@
 // Backend unit tests. Plain asserts so they build with MSVC and g++ alike, no WebView2 needed.
+#include "backend/alert_metadata.h"
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
@@ -178,44 +179,6 @@ struct NoModelSink : FakeSink {
 };
 
 } // namespace
-
-// event.describe: audit detail is "slm" only when the sink can reach a model; otherwise "template" and no command.
-static void test_describe_source() {
-    const auto dir = std::filesystem::temp_directory_path() / "rigmind-describe-test";
-    std::filesystem::remove_all(dir);
-    std::filesystem::create_directories(dir);
-    const std::string db = (dir / "rigmind.db").string();
-    const char* request =
-        R"({"id":1,"method":"event.describe","params":{"alertId":"EV-9","severity":"Critical","condition":"Platform-elevator collision","place":"Demo rig 01","camId":"CAM-01"}})";
-    FakeSink with_model;
-    NoModelSink without_model;
-    {
-        rigmind::EventStore store(db);
-        rigmind::AuditLog audit(db);
-        rigmind::Bridge up(store, &with_model, &audit);
-        const auto a = nlohmann::json::parse(up.handle(request));
-        CHECK(a["result"]["slm"] == true);
-        CHECK(with_model.commands.size() == 1 && with_model.commands[0]["cmd"] == "describe");
-        rigmind::Bridge down(store, &without_model, &audit);
-        const auto b = nlohmann::json::parse(down.handle(request));
-        CHECK(b["ok"] == true);
-        CHECK(b["result"]["slm"] == false);
-        CHECK(b["result"]["text"].get<std::string>().find("CAM-01") != std::string::npos);
-        CHECK(without_model.commands.empty());
-    }
-    std::string log;
-    {
-        std::ifstream in((dir / "audit.log").string());
-        log.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
-    }
-    const auto slm_row = log.find("event.describe");
-    CHECK(slm_row != std::string::npos);
-    const auto second = log.find("event.describe", slm_row + 1);
-    CHECK(second != std::string::npos);
-    CHECK(log.substr(slm_row, log.find('\n', slm_row) - slm_row).find("slm") != std::string::npos);
-    CHECK(log.substr(second, log.find('\n', second) - second).find("template") != std::string::npos);
-    std::filesystem::remove_all(dir);
-}
 
 static void test_stream_commands() {
     rigmind::EventStore store(":memory:");
@@ -466,7 +429,7 @@ static void test_alarm_episode_recorder() {
         CHECK(e["alertId"] == id && e["phase"] == "Escalated" && e["escalation"] == 1);
         rows = store.list_raised_alerts(10);
         CHECK(rows.size() == 1 && rows[0]["severity"] == "Warning" && rows[0]["status"] == "Escalated");
-        CHECK(rows[0]["condition"] == "Elevator near platform");
+        CHECK(rows[0]["condition"] == "Orange alert" && rows[0]["place"] == "CAM-01"); // neutral label + camera; wording on the line is ignored
 
         e = rec.handle(alarm_line("CAM-01", "Red", "Platform-elevator collision", "Drill floor", 60), 3000);
         CHECK(e["alertId"] == id && e["phase"] == "Escalated" && e["escalation"] == 2);
@@ -477,13 +440,13 @@ static void test_alarm_episode_recorder() {
         CHECK(e["alertId"] == id && e["phase"] == "Cleared");
         rows = store.list_raised_alerts(10);
         CHECK(rows.size() == 1 && rows[0]["severity"] == "Critical" && rows[0]["status"] == "Cleared");
-        CHECK(rows[0]["condition"] == "Platform-elevator collision"); // Cleared keeps the last condition
+        CHECK(rows[0]["condition"] == "Red alert"); // Cleared keeps the peak level label
 
         auto events = store.recent_transitions(50);
         CHECK(events.size() == 4);
         CHECK(events[3]["from"] == "NONE" && events[3]["to"] == "YELLOW" && events[3]["camId"] == "CAM-01" &&
-              events[3]["alertId"] == id && events[3]["condition"] == "Link-tilt angled" &&
-              events[3]["place"] == "Drill floor" && events[3]["frame"] == 10 && events[3]["severity"] == "Advisory");
+              events[3]["alertId"] == id && events[3]["condition"] == "Yellow monitoring" &&
+              events[3]["place"] == "CAM-01" && events[3]["frame"] == 10 && events[3]["severity"] == "Advisory");
         CHECK(events[0]["from"] == "RED" && events[0]["to"] == "NONE");
 
         // A repeated None changes nothing; a skip None -> Orange is recorded and opens a second episode.
@@ -527,13 +490,13 @@ static void test_alarm_episode_recorder() {
         std::getline(in, line);
         const auto first = nlohmann::json::parse(line);
         CHECK(first["source"] == "backend" && first["target"] == "ALM-CAM-01-b11" &&
-              first["detail"] == "None -> Yellow | Link-tilt angled | Drill floor | CAM-01");
+              first["detail"] == "None -> Yellow | Yellow monitoring | CAM-01");
     }
     {
         rigmind::EventStore reopened(db);
         const auto audited = reopened.recent_audit("alarm.transition", 50); // real audit rows, newest first
         CHECK(audited.size() == 10);
-        CHECK(audited[9]["detail"] == "None -> Yellow | Link-tilt angled | Drill floor | CAM-01");
+        CHECK(audited[9]["detail"] == "None -> Yellow | Yellow monitoring | CAM-01");
         CHECK(reopened.recent_audit("nothing.here", 5).empty());
     }
     std::filesystem::remove_all(dir);
@@ -612,19 +575,22 @@ static void test_ppe_episode_recorder() {
         auto e = rec.handle(ppe_line("CAM-01", "missing", {"vest"}), 1000);
         const std::string id = e["alertId"];
         CHECK(id == "PPE-CAM-01-b11" && id.size() <= 32);
-        CHECK(e["phase"] == "Open" && e["changed"] == true && e["condition"] == "PPE not detected: vest" && e["severity"] == "Advisory");
+        CHECK(e["phase"] == "Open" && e["changed"] == true && e["condition"] == "PPE items not detected" && e["severity"] == "Advisory" && e["action"] == "raised");
         auto rows = store.list_raised_alerts(10);
         CHECK(rows.size() == 1 && rows[0]["severity"] == "Advisory" && rows[0]["status"] == "Open" &&
-              rows[0]["condition"] == "PPE not detected: vest" && rows[0]["raisedMs"] == 1000);
+              rows[0]["condition"] == "PPE items not detected" && rows[0]["place"] == "CAM-01" && rows[0]["raisedMs"] == 1000);
+        CHECK(rows[0]["metadata"]["kind"] == "ppe" && rows[0]["metadata"]["camera"] == "CAM-01" && rows[0]["metadata"]["missing"] == nlohmann::json::array({"vest"}) &&
+              rows[0]["metadata"]["persons"] == 1 && rows[0]["metadata"]["since_ms"] == 1);
 
         // Same missing set: nothing changes. A different set updates the same row in place.
         e = rec.handle(ppe_line("CAM-01", "missing", {"vest"}), 1100);
         CHECK(e["alertId"] == id && e["changed"] == false);
         e = rec.handle(ppe_line("CAM-01", "missing", {"vest", "gloves"}, 2), 2000);
-        CHECK(e["alertId"] == id && e["changed"] == true && e["condition"] == "PPE not detected: vest, gloves");
+        CHECK(e["alertId"] == id && e["changed"] == true && e["condition"] == "PPE items not detected" && e["action"] == "updated");
         rows = store.list_raised_alerts(10);
-        CHECK(rows.size() == 1 && rows[0]["condition"] == "PPE not detected: vest, gloves" && rows[0]["status"] == "Open" &&
+        CHECK(rows.size() == 1 && rows[0]["condition"] == "PPE items not detected" && rows[0]["status"] == "Open" &&
               rows[0]["raisedMs"] == 1000 && rows[0]["updatedMs"] == 2000);
+        CHECK(rows[0]["metadata"]["missing"] == nlohmann::json::array({"vest", "gloves"}) && rows[0]["metadata"]["persons"] == 2);
 
         // An 'ok' with no episode on another camera is ignored; the open one is cleared and keeps its condition.
         e = rec.handle(ppe_line("CAM-09", "ok", {}), 2500);
@@ -632,7 +598,8 @@ static void test_ppe_episode_recorder() {
         e = rec.handle(ppe_line("CAM-01", "ok", {}), 3000);
         CHECK(e["alertId"] == id && e["phase"] == "Cleared" && e["changed"] == true);
         rows = store.list_raised_alerts(10);
-        CHECK(rows.size() == 1 && rows[0]["status"] == "Cleared" && rows[0]["condition"] == "PPE not detected: vest, gloves");
+        CHECK(rows.size() == 1 && rows[0]["status"] == "Cleared" && rows[0]["condition"] == "PPE items not detected" &&
+              rows[0]["metadata"]["closed"] == true && rows[0]["metadata"]["missing"].size() == 2);
         e = rec.handle(ppe_line("CAM-01", "ok", {}), 3100);
         CHECK(e["changed"] == false || !e.contains("alertId"));
 
@@ -657,9 +624,9 @@ static void test_ppe_episode_recorder() {
         const auto audited = reopened.recent_audit("ppe.transition", 20);
         CHECK(audited.size() == 4);
         CHECK(audited[3]["source"] == "backend" && audited[3]["target"] == "PPE-CAM-01-b11" &&
-              audited[3]["detail"] == "raised | PPE not detected: vest | persons 1 | CAM-01");
-        CHECK(audited[2]["detail"] == "updated | PPE not detected: vest, gloves | persons 2 | CAM-01");
-        CHECK(audited[1]["detail"].get<std::string>().rfind("cleared | PPE not detected: vest, gloves", 0) == 0);
+              audited[3]["detail"] == "raised | PPE items not detected: vest | persons 1 | CAM-01");
+        CHECK(audited[2]["detail"] == "updated | PPE items not detected: vest, gloves | persons 2 | CAM-01");
+        CHECK(audited[1]["detail"].get<std::string>().rfind("cleared | PPE items not detected: vest, gloves", 0) == 0);
     }
     std::filesystem::remove_all(dir);
 }
@@ -697,6 +664,183 @@ static void test_alarm_events_migration() {
     }
     std::filesystem::remove_all(dir);
 }
+// event.describe: the prompt comes from the metadata stored for the alert id (never from page text); audit detail is "slm" only
+// when the sink can reach a model; otherwise "unavailable", no command, and the row says so.
+static nlohmann::json facts_line(const char* cam, bool angled, bool near_platform, double angle, double derrickman_cx) {
+    return {{"ev", "facts"}, {"cam", cam}, {"zoomed", false}, {"scale_mode", "x"}, {"frames", 12}, {"w", 1000}, {"h", 500},
+            {"machine_present", true}, {"link_tilt_present", true}, {"link_tilt_angled", angled}, {"elevator_present", near_platform},
+            {"elevator_near_platform", near_platform}, {"angle_deg", angle}, {"derrickman_cx", derrickman_cx}, {"machine_cx", 600.0},
+            {"pct", {{"link_tilt_angled", 80.0}}}, {"pct_no_roi", {{"x", 1}}}, {"angles", {1, 2}}, {"roi", {10, 20, 900, 480}}};
+}
+
+static void test_describe_source() {
+    const auto dir = std::filesystem::temp_directory_path() / "rigmind-describe-test";
+    std::filesystem::remove_all(dir);
+    std::filesystem::create_directories(dir);
+    const std::string db = (dir / "rigmind.db").string();
+    // Page-supplied wording must be ignored: only the alert id counts.
+    const char* request =
+        R"({"id":1,"method":"event.describe","params":{"alertId":"ALM-CAM-01-d11","severity":"Critical","condition":"PAGE-SUPPLIED-WORDS","place":"Demo rig 01","camId":"CAM-09"}})";
+    FakeSink with_model;
+    NoModelSink without_model;
+    {
+        rigmind::EventStore store(db);
+        rigmind::AuditLog audit(db);
+        rigmind::AlarmRecorder rec(store, &audit, "d1");
+        rec.note_facts(facts_line("CAM-01", true, false, 28.4, 410.0), 900);
+        rec.handle(alarm_line("CAM-01", "Yellow"), 1000);
+        rec.note_facts(facts_line("CAM-01", true, true, 31.0, 410.0), 1900);
+        rec.handle(alarm_line("CAM-01", "Orange"), 2000);
+        rigmind::Bridge up(store, &with_model, &audit);
+        const auto a = nlohmann::json::parse(up.handle(request));
+        CHECK(a["ok"] == true && a["result"]["slm"] == true && a["result"]["text"].is_null());
+        CHECK(with_model.commands.size() == 1 && with_model.commands[0]["cmd"] == "describe");
+        const auto& cmd = with_model.commands[0];
+        const std::string prompt = cmd["prompt"];
+        CHECK(cmd["camId"] == "CAM-01" && cmd["place"] == "CAM-01" && cmd["severity"] == "Warning"); // from the stored row
+        CHECK(prompt.find("PAGE-SUPPLIED-WORDS") == std::string::npos && prompt.find("CAM-09") == std::string::npos);
+        CHECK(prompt.find("Camera CAM-01 reached the Orange level") != std::string::npos && prompt.find("severity Warning") != std::string::npos);
+        CHECK(prompt.find("Yellow > Orange, still going") != std::string::npos);
+        CHECK(prompt.find("link tilt angled 28 degrees") != std::string::npos && prompt.find("link tilt angled 31 degrees") != std::string::npos);
+        CHECK(prompt.find("elevator near platform") != std::string::npos);
+        CHECK(prompt.find("derrickman at 41% of the frame width") != std::string::npos && prompt.find("machine at 60%") != std::string::npos);
+        rigmind::Bridge down(store, &without_model, &audit);
+        const auto b = nlohmann::json::parse(down.handle(request));
+        CHECK(b["ok"] == true);
+        CHECK(b["result"]["slm"] == false && b["result"]["text"].is_null());
+        CHECK(without_model.commands.empty());
+        const auto row = store.find_raised_alert("ALM-CAM-01-d11");
+        CHECK(row["summary"].is_null() && row["summarySource"] == "unavailable");
+        // The SLM result is stored by the host: text survives, a later failed attempt does not wipe it.
+        store.put_alert_summary("ALM-CAM-01-d11", "Camera CAM-01 saw the elevator near the platform. Check the area.", "slm", 3000);
+        store.put_alert_summary("ALM-CAM-01-d11", "", "template", 3100);
+        const auto done = store.list_raised_alerts(5)[0];
+        CHECK(done["summary"] == "Camera CAM-01 saw the elevator near the platform. Check the area." && done["summarySource"] == "slm" && done["summaryAt"] == 3000);
+        // alert.get: one row with metadata and summary, null for an unknown id
+        const auto got = nlohmann::json::parse(up.handle(R"({"id":3,"method":"alert.get","params":{"id":"ALM-CAM-01-d11"}})"));
+        CHECK(got["ok"] == true && got["result"]["metadata"]["cycle"] == "Y>O" && got["result"]["summarySource"] == "slm" && got["result"]["place"] == "CAM-01");
+        CHECK(nlohmann::json::parse(up.handle(R"({"id":4,"method":"alert.get","params":{"id":"nope"}})"))["result"].is_null());
+        // An alert with no stored metadata still gets a neutral prompt (label + camera), not a made-up sentence.
+        const auto c = nlohmann::json::parse(up.handle(R"({"id":2,"method":"event.describe","params":{"alertId":"EV-9","severity":"Critical","camId":"CAM-01"}})"));
+        CHECK(c["ok"] == true && c["result"]["hasMetadata"] == false);
+        CHECK(with_model.commands.size() == 2 && std::string(with_model.commands[1]["prompt"]).find("Camera CAM-01") != std::string::npos);
+    }
+    std::string log;
+    {
+        std::ifstream in((dir / "audit.log").string());
+        log.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+    }
+    const auto slm_row = log.find("event.describe");
+    CHECK(slm_row != std::string::npos);
+    const auto second = log.find("event.describe", slm_row + 1);
+    CHECK(second != std::string::npos);
+    CHECK(log.substr(slm_row, log.find('\n', slm_row) - slm_row).find("slm") != std::string::npos);
+    CHECK(log.substr(second, log.find('\n', second) - second).find("unavailable") != std::string::npos);
+    std::filesystem::remove_all(dir);
+}
+
+static const nlohmann::json* find_row(const nlohmann::json& rows, const std::string& id) {
+    for (const auto& r : rows)
+        if (r["id"] == id) return &r;
+    return nullptr;
+}
+
+// Alert metadata is facts only: per state change the EWS facts true at that moment, the cycle path and the peak; the row keeps a
+// neutral peak label (also after the cycle closes); persistence survives a restart.
+static void test_alert_metadata() {
+    const auto dir = std::filesystem::temp_directory_path() / "rigmind-metadata-test";
+    std::filesystem::remove_all(dir);
+    std::filesystem::create_directories(dir);
+    const std::string db = (dir / "rigmind.db").string();
+    std::string first, second, third;
+    {
+        rigmind::EventStore store(db);
+        rigmind::AlarmRecorder rec(store, nullptr, "m1");
+        // no facts yet: the first state change carries null facts
+        auto e = rec.handle(alarm_line("CAM-01", "Yellow"), 1000);
+        first = e["alertId"];
+        CHECK(e["condition"] == "Yellow monitoring" && e["place"] == "CAM-01" && e["peakRaised"] == true);
+        rec.note_facts(facts_line("CAM-01", true, false, 28.4, 410.0), 1500);
+        e = rec.handle(alarm_line("CAM-01", "Yellow"), 1600);
+        CHECK(e["changed"] == false && e["peakRaised"] == false);
+        rec.note_facts(facts_line("CAM-01", true, true, 31.0, 420.0), 2900);
+        e = rec.handle(alarm_line("CAM-01", "Orange", "Elevator near the platform", "Camera CAM-01", 40), 3000);
+        CHECK(e["peakRaised"] == true && e["condition"] == "Orange alert");
+        rec.note_facts(facts_line("CAM-01", false, false, 3.0, 430.0), 3900);
+        e = rec.handle(alarm_line("CAM-01", "Yellow", "", "", 90), 4000);
+        CHECK(e["closed"]["alertId"] == first && e["closed"]["cycle"] == "Y>O>Y");
+        second = e["alertId"];
+        CHECK(second != first);
+
+        auto rows = store.list_raised_alerts(10);
+        const auto* r1 = find_row(rows, first);
+        CHECK(r1 && (*r1)["condition"] == "Orange alert" && (*r1)["place"] == "CAM-01" && (*r1)["status"] == "Cleared" && (*r1)["phase"] == "Cleared");
+        const auto meta = (*r1)["metadata"];
+        CHECK(meta["kind"] == "alarm" && meta["camera"] == "CAM-01" && meta["peak"] == "Orange" && meta["cycle"] == "Y>O>Y" && meta["closed"] == true);
+        CHECK(meta["states"].size() == 3);
+        CHECK(meta["states"][0]["state"] == "Yellow" && meta["states"][0]["tsMs"] == 1000 && meta["states"][0]["facts"].is_null());
+        CHECK(meta["states"][1]["state"] == "Orange" && meta["states"][1]["frame"] == 40 && meta["states"][1]["facts"]["elevator_near_platform"] == true &&
+              meta["states"][1]["facts"]["link_tilt_angled"] == true && meta["states"][1]["facts"]["angle_deg"] == 31.0 &&
+              meta["states"][1]["facts"]["derrickman_cx"] == 420.0 && meta["states"][1]["facts"]["w"] == 1000);
+        CHECK(!meta["states"][1]["facts"].contains("angles") && !meta["states"][1]["facts"].contains("pct_no_roi") && meta["states"][1]["facts"].contains("pct") &&
+              meta["states"][1]["facts"]["roi"].size() == 4);
+        CHECK(meta["states"][2]["state"] == "Yellow" && meta["states"][2]["facts"]["link_tilt_angled"] == false && meta["states"][2]["facts"]["angle_deg"] == 3.0);
+        // the next cycle's row starts at that same Yellow and keeps its own label
+        const auto* r2 = find_row(rows, second);
+        CHECK(r2 && (*r2)["condition"] == "Yellow monitoring" && (*r2)["metadata"]["states"].size() == 1 && (*r2)["metadata"]["cycle"] == "Y" &&
+              (*r2)["metadata"]["closed"] == false && (*r2)["metadata"]["states"][0]["facts"]["angle_deg"] == 3.0);
+
+        // critical cycle: Y>O>R>O>Y, the Red raises the peak once; the label stays "Red alert" after the close
+        rec.handle(alarm_line("CAM-01", "Orange"), 5000);
+        e = rec.handle(alarm_line("CAM-01", "Red"), 6000);
+        CHECK(e["peakRaised"] == true && e["condition"] == "Red alert" && e["escalation"] == 2);
+        e = rec.handle(alarm_line("CAM-01", "Orange"), 7000);
+        CHECK(e["peakRaised"] == false && e["condition"] == "Orange alert");
+        e = rec.handle(alarm_line("CAM-01", "Yellow"), 8000);
+        CHECK(e["closed"]["critical"] == true && e["closed"]["cycle"] == "Y>O>R>O>Y");
+        third = e["closed"]["alertId"];
+        rows = store.list_raised_alerts(10);
+        const auto* r3 = find_row(rows, third);
+        CHECK(r3 && (*r3)["condition"] == "Red alert" && (*r3)["severity"] == "Critical" && (*r3)["metadata"]["peak"] == "Red" &&
+              (*r3)["metadata"]["states"].size() == 5 && (*r3)["metadata"]["states"][2]["state"] == "Red");
+        // no prose in any stored field
+        const std::string all = rows.dump();
+        for (const char* prose : {"Machine present", "Elevator near the platform", "Camera CAM-01", "Safety condition"})
+            CHECK(all.find(prose) == std::string::npos);
+
+        // facts of another camera are not mixed in
+        rec.note_facts(facts_line("CAM-02", true, true, 50.0, 100.0), 8100);
+        e = rec.handle(alarm_line("CAM-03", "Yellow"), 8200);
+        CHECK(store.find_raised_alert(e["alertId"])["metadata"]["states"][0]["facts"].is_null());
+        CHECK(store.find_raised_alert("nope").is_null());
+    }
+    {
+        rigmind::EventStore reopened(db); // restart: metadata is still on the rows, and a stored summary is kept
+        reopened.put_alert_summary(first, "Camera CAM-01 saw it. Check the area.", "slm", 9000);
+    }
+    {
+        rigmind::EventStore reopened(db);
+        const auto row = reopened.find_raised_alert(first);
+        CHECK(row["metadata"]["cycle"] == "Y>O>Y" && row["summary"] == "Camera CAM-01 saw it. Check the area." && row["summarySource"] == "slm");
+        CHECK(reopened.get_alert_metadata(first).has_value());
+    }
+
+    // unit: fact trimming and the deterministic list
+    const auto trimmed = rigmind::trim_facts(facts_line("CAM-01", true, true, 28.4, 410.0));
+    CHECK(!trimmed.contains("ev") && !trimmed.contains("cam") && !trimmed.contains("frames") && trimmed["machine_present"] == true);
+    const std::string list = rigmind::facts_list(trimmed);
+    CHECK(list.find("link tilt angled 28 degrees") != std::string::npos && list.find("elevator near platform") != std::string::npos);
+    CHECK(rigmind::facts_list(nlohmann::json::object()).empty() && rigmind::facts_list(nullptr).empty());
+    // PPE prompt: items not detected and the people count
+    const std::string ppe = rigmind::describe_prompt({{"kind", "ppe"}, {"camera", "CAM-01"}, {"missing", {"vest", "gloves"}}, {"persons", 2}}, "Advisory", "PPE items not detected", "CAM-01", 1000);
+    CHECK(ppe.find("did not detect these PPE items: vest, gloves") != std::string::npos && ppe.find("with 2 people in view") != std::string::npos && ppe.find("Camera CAM-01") != std::string::npos);
+    // guard: the place is the camera id - naming the camera is enough, nothing is added twice
+    const nlohmann::json ev = {{"camId", "CAM-01"}, {"place", "CAM-01"}};
+    CHECK(rigmind::reject_reason("Camera CAM-01 saw the elevator near the platform.", ev).empty());
+    CHECK(rigmind::with_context("The elevator came near the platform.", ev) == "Camera CAM-01: the elevator came near the platform.");
+    std::filesystem::remove_all(dir);
+}
+
 int main() {
     test_alarm_episode_recorder();
     test_event_cycles();
@@ -708,6 +852,7 @@ int main() {
     test_snapshot_plan();
     test_audit_trail();
     test_describe_source();
+    test_alert_metadata();
     test_zoom_thresholds();
     test_simulate_detection_to_alerts();
     test_yellow_after_stable_frames();

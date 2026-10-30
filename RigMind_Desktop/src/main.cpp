@@ -10,6 +10,7 @@
 #include <WebView2.h>
 #include <WebView2EnvironmentOptions.h>
 
+#include <algorithm>
 #include <chrono>
 #include <fstream>
 #include <cstdlib>
@@ -21,6 +22,7 @@
 #include <memory>
 #include <mutex>
 #include <stdexcept>
+#include <set>
 #include <string>
 
 #include "backend/alarm_recorder.h"
@@ -327,6 +329,46 @@ void audit_activity(const std::string& line) {
     }
 }
 
+// The SLM's sentence is stored on the alert row (alert_summaries), so it survives a restart and every page and the MCP module
+// read the same text. A description without text (model down, queue full, rejected sentence) is stored as source 'template'
+// with no text; it never replaces a sentence written earlier.
+void persist_description(const nlohmann::json& e) {
+    const std::string id = e.value("alertId", std::string());
+    if (id.empty()) return;
+    if (g_router) g_router->describe_done(id);
+    if (!g_store) return;
+    const std::string text = e.contains("text") && e["text"].is_string() ? e["text"].get<std::string>() : std::string();
+    const std::string source = !text.empty() && e.value("source", std::string()) == "slm" ? "slm" : "template";
+    try {
+        g_store->put_alert_summary(id, source == "slm" ? text : std::string(), source, now_ms());
+    } catch (const std::exception&) {
+    }
+}
+
+// Asks for the SLM summary of an alert from the host itself (so it also happens with the page closed). The bridge runs on the UI
+// thread only, so the request is posted to the window. live: the scene of this moment is added to the prompt.
+void request_summary_from_host(const std::string& alert_id, bool live) {
+    if (alert_id.empty() || !g_hwnd) return;
+    const nlohmann::json request = {{"id", 0}, {"method", "event.describe"},
+                                    {"params", {{"alertId", alert_id}, {"tsMs", now_ms()}, {"sceneTs", live ? now_ms() : std::int64_t{0}}}}};
+    auto* message = new std::string(request.dump());
+    if (!PostMessageW(g_hwnd, WM_APP_MCP, 0, reinterpret_cast<LPARAM>(message))) delete message;
+}
+
+// Orange and Red cycle closes, a Red opening and a PPE opening each get one SLM summary.
+void auto_summary(const nlohmann::json& event) {
+    if (!event.is_object() || !event.value("changed", false)) return;
+    const std::string kind = event.value("ev", std::string());
+    if (kind == "alarm") {
+        if (event.contains("closed") && event["closed"].is_object() && event["closed"].value("peak", 0) >= 1)
+            request_summary_from_host(event["closed"].value("alertId", std::string()), false);
+        else if (event.value("state", std::string()) == "Red" && event.value("peakRaised", false))
+            request_summary_from_host(event.value("alertId", std::string()), true);
+    } else if (kind == "ppe" && event.value("action", std::string()) == "raised") {
+        request_summary_from_host(event.value("alertId", std::string()), true);
+    }
+}
+
 // Every host line (pipeline answers, clip reports, SLM descriptions) goes to the page through the window.
 // Alarm lines are first recorded by the host (alarm_events, audit trail, the episode's single alert row), so the
 // history is complete even when the page is closed. The enriched line (alertId, phase, escalation) goes on to the page.
@@ -340,9 +382,18 @@ void post_line(const std::string& line) {
         return;
     }
     audit_activity(line);
+    // Facts lines (~2 Hz per camera): the latest one is attached, as alert metadata, to the next alarm state change. They still
+    // go on to the page.
+    if (g_recorder && line.find("\"ev\":\"facts\"") != std::string::npos) {
+        try {
+            g_recorder->note_facts(nlohmann::json::parse(line), now_ms());
+        } catch (const std::exception&) {
+        }
+    }
     if (line.find("\"ev\":\"description\"") != std::string::npos) {
         try {
             const auto e = nlohmann::json::parse(line);
+            persist_description(e);
             std::lock_guard<std::mutex> lock(g_desc_mutex);
             if (g_descriptions.size() > 64) g_descriptions.clear();
             const std::string text = e.contains("text") && e["text"].is_string() ? e["text"].get<std::string>() : std::string(); // null = template stands
@@ -356,8 +407,11 @@ void post_line(const std::string& line) {
     if (g_recorder && line.find("\"alarm\"") != std::string::npos) {
         try {
             const auto event = nlohmann::json::parse(line);
-            if (event.is_object() && event.value("ev", std::string()) == "alarm")
-                forwarded = g_recorder->handle(event, now_ms()).dump();
+            if (event.is_object() && event.value("ev", std::string()) == "alarm") {
+                const nlohmann::json enriched = g_recorder->handle(event, now_ms());
+                forwarded = enriched.dump();
+                auto_summary(enriched);
+            }
         } catch (const std::exception&) {
             forwarded.clear(); // not valid alarm JSON: forward the original line untouched
         }
@@ -366,8 +420,11 @@ void post_line(const std::string& line) {
     if (g_ppe_recorder && line.find("\"ppe\"") != std::string::npos) {
         try {
             const auto event = nlohmann::json::parse(line);
-            if (event.is_object() && event.value("ev", std::string()) == "ppe")
-                forwarded = g_ppe_recorder->handle(event, now_ms()).dump();
+            if (event.is_object() && event.value("ev", std::string()) == "ppe") {
+                const nlohmann::json enriched = g_ppe_recorder->handle(event, now_ms());
+                forwarded = enriched.dump();
+                auto_summary(enriched);
+            }
         } catch (const std::exception&) {
             forwarded.clear();
         }
@@ -421,6 +478,35 @@ void open_saved_cameras() {
     }
 }
 
+// ---- Zone based inference --------------------------------------------------------------------------------------------------
+
+// Sends every camera's saved zone to the pipeline. The zone (record zones:v1, drawn on the Zone editor page) is used only when the
+// camera's inference area (record zones:mode:v1) is "zone"; otherwise the whole picture counts. Runs on the UI thread.
+void push_zones() {
+    if (!g_pipeline || !g_store) return;
+    try {
+        nlohmann::json zones = nlohmann::json::object(), modes = nlohmann::json::object();
+        if (const auto z = g_store->get_record("zones:v1")) zones = nlohmann::json::parse(*z);
+        if (const auto m = g_store->get_record("zones:mode:v1")) modes = nlohmann::json::parse(*m);
+        std::set<std::string> cams;
+        if (zones.is_object())
+            for (const auto& [cam, v] : zones.items()) cams.insert(cam);
+        if (const auto s = g_store->get_record("stream.sources")) {
+            const auto sources = nlohmann::json::parse(*s);
+            if (sources.is_object())
+                for (const auto& [cam, v] : sources.items()) cams.insert(cam);
+        }
+        for (const std::string& cam : cams) {
+            nlohmann::json points = nlohmann::json::array();
+            if (zones.is_object() && zones.contains(cam) && zones[cam].is_object() && zones[cam].contains("points") && zones[cam]["points"].is_array()) points = zones[cam]["points"];
+            const bool zone_mode = modes.is_object() && modes.contains(cam) && modes[cam].is_string() && modes[cam].get<std::string>() == "zone";
+            g_pipeline->send({{"cmd", "zone"}, {"cam", cam}, {"enabled", zone_mode && points.size() >= 3}, {"points", points}});
+        }
+    } catch (const std::exception&) {
+        // A malformed record leaves the pipeline's zones as they were.
+    }
+}
+
 // ---- MCP module (local HTTP endpoint for alerts, evidence, reports and the live scene) ------------------------------------
 
 std::filesystem::path documents_reports_dir() {
@@ -440,10 +526,9 @@ nlohmann::json mcp_request_summary(const nlohmann::json& alert, int timeout_ms) 
         std::lock_guard<std::mutex> lock(g_desc_mutex);
         g_descriptions.erase(id);
     }
+    // The prompt is built by the bridge from the metadata stored for the alert id; only the scene time comes from the caller.
     const nlohmann::json request = {{"id", 0}, {"method", "event.describe"},
-                                    {"params", {{"alertId", id}, {"severity", alert.value("severity", std::string())}, {"condition", alert.value("condition", std::string())},
-                                                {"place", alert.value("place", std::string())}, {"camId", alert.value("camId", std::string())},
-                                                {"tsMs", now_ms()}, {"sceneTs", alert.value("sceneTs", std::int64_t{0})}}}};
+                                    {"params", {{"alertId", id}, {"tsMs", now_ms()}, {"sceneTs", alert.value("sceneTs", std::int64_t{0})}}}};
     auto* message = new std::string(request.dump());
     if (!g_hwnd || !PostMessageW(g_hwnd, WM_APP_MCP, 0, reinterpret_cast<LPARAM>(message))) {
         delete message;
@@ -561,6 +646,10 @@ void init_backend() {
     }
     g_router = std::make_unique<StreamRouter>(g_pipeline.get(), g_slm.get(), post_line);
     g_bridge = std::make_unique<rigmind::Bridge>(*g_store, g_router.get(), g_audit.get());
+    g_bridge->set_record_hook([](const std::string& key) {
+        if (key == "zones:v1" || key == "zones:mode:v1") push_zones(); // a saved zone or a changed inference area reaches the pipeline at once
+    });
+    push_zones();
     g_bridge->set_auth_required(true); // the page cannot reach the host's data or the cameras before an account has signed in
     start_mcp(db_path);
 }
@@ -662,13 +751,12 @@ void notify_from_line(const std::string& line) {
         if (kind == "alarm") {
             const std::string state = event.value("state", std::string());
             if (state != "Orange" && state != "Red") return; // Yellow only says the app is monitoring
-            if (condition.empty()) condition = "Safety condition detected";
             const std::wstring title = to_wide(state + (state == "Red" ? " alarm" : " warning") + (cam.empty() ? "" : " - " + cam));
             tray_notify(title, to_wide(condition + (place.empty() ? "" : " - " + place)), state == "Red" ? 2 : 1, false);
             if (g_audit) g_audit->record("backend", "notification.tray", cam, state + " | " + condition, now_ms());
         } else if (kind == "ppe") {
             if (event.value("phase", std::string()) != "Open") return;
-            if (condition.empty()) condition = "PPE not detected";
+            if (condition.empty()) condition = "PPE items not detected";
             tray_notify(to_wide("Advisory" + (cam.empty() ? std::string() : " - " + cam)), to_wide(condition), 0, true);
             if (g_audit) g_audit->record("backend", "notification.tray", cam, "Advisory | " + condition, now_ms());
         }
@@ -691,16 +779,67 @@ void tray_menu() {
     if (chosen == kTrayMenuExit) DestroyWindow(g_hwnd);
 }
 
+// ---- Window size and display scaling ---------------------------------------------------------------------------------------
+// The app is per-monitor DPI aware (set first thing in wWinMain): Windows then does not stretch the window, and the web view's bounds
+// are the real client area. Without this, on a 125% or 150% display the web view could end up smaller or larger than the visible
+// window, leaving a blank band on the right or bottom edge or cutting off what sits there (such as the toasts at the bottom right).
+
+using GetDpiForWindowFn = UINT(WINAPI*)(HWND);
+using GetDpiForSystemFn = UINT(WINAPI*)();
+
+UINT dpi_of(HWND window) {
+    static const auto for_window = reinterpret_cast<GetDpiForWindowFn>(GetProcAddress(GetModuleHandleW(L"user32.dll"), "GetDpiForWindow"));
+    static const auto for_system = reinterpret_cast<GetDpiForSystemFn>(GetProcAddress(GetModuleHandleW(L"user32.dll"), "GetDpiForSystem"));
+    if (window && for_window) {
+        if (const UINT d = for_window(window)) return d;
+    }
+    if (for_system) {
+        if (const UINT d = for_system()) return d;
+    }
+    return 96;
+}
+
+// The first window: 1440 x 900 at 100%, scaled to the display, never larger than 92% of the work area, centred.
+void initial_window_rect(int& x, int& y, int& w, int& h) {
+    const UINT dpi = dpi_of(nullptr);
+    RECT work{0, 0, 1920, 1040};
+    MONITORINFO info{sizeof(info)};
+    if (GetMonitorInfoW(MonitorFromPoint(POINT{0, 0}, MONITOR_DEFAULTTOPRIMARY), &info)) work = info.rcWork;
+    const int avail_w = work.right - work.left, avail_h = work.bottom - work.top;
+    w = (std::min)(MulDiv(1440, static_cast<int>(dpi), 96), avail_w * 92 / 100);
+    h = (std::min)(MulDiv(900, static_cast<int>(dpi), 96), avail_h * 92 / 100);
+    x = work.left + (avail_w - w) / 2;
+    y = work.top + (avail_h - h) / 2;
+}
+
 LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam) {
     switch (message) {
     case WM_SIZE:
         resize_webview();
         return 0;
+    case WM_WINDOWPOSCHANGED: // maximise, restore, move to another screen: the web view follows the real client area
+        resize_webview();
+        if (g_controller) g_controller->NotifyParentWindowPositionChanged();
+        break;
+    case WM_DPICHANGED: { // dragged to a display with another scale: take the size Windows suggests for it
+        const RECT* suggested = reinterpret_cast<const RECT*>(lparam);
+        SetWindowPos(hwnd, nullptr, suggested->left, suggested->top, suggested->right - suggested->left, suggested->bottom - suggested->top, SWP_NOZORDER | SWP_NOACTIVATE);
+        resize_webview();
+        return 0;
+    }
+    case WM_GETMINMAXINFO: { // not smaller than the app's narrowest layout (960 x 600 at 100%)
+        auto* limits = reinterpret_cast<MINMAXINFO*>(lparam);
+        const UINT dpi = dpi_of(hwnd);
+        limits->ptMinTrackSize.x = MulDiv(960, static_cast<int>(dpi), 96);
+        limits->ptMinTrackSize.y = MulDiv(600, static_cast<int>(dpi), 96);
+        return 0;
+    }
     case WM_APP_PIPE: {
         std::unique_ptr<std::string> line(reinterpret_cast<std::string*>(lparam));
         // A finished alarm clip becomes a footage row. This runs on the UI thread, where the bridge may be called.
         if (g_bridge && (line->find("\"clip\"") != std::string::npos || line->find("\"snapshot\"") != std::string::npos)) record_clip_line(*line);
         notify_from_line(*line);
+        if (line->find("\"ev\":\"status\"") != std::string::npos && line->find("\"state\":\"online\"") != std::string::npos) push_zones();
         // Host events (alarms, detections, answers) go to the page only while an account is signed in.
         if (g_webview && g_bridge && g_bridge->authenticated()) g_webview->PostWebMessageAsJson(to_wide(*line).c_str());
         return 0;
@@ -725,6 +864,12 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam) 
 } // namespace
 
 int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, LPWSTR, int show) {
+    {
+        // Per-monitor v2 DPI awareness, before any window exists (Windows 10 1703 and later; older systems: system awareness).
+        using SetContextFn = BOOL(WINAPI*)(HANDLE);
+        const auto set_context = reinterpret_cast<SetContextFn>(GetProcAddress(GetModuleHandleW(L"user32.dll"), "SetProcessDpiAwarenessContext"));
+        if (!set_context || !set_context(reinterpret_cast<HANDLE>(-4))) SetProcessDPIAware(); // -4 = DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2
+    }
     CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
 
     // Only one RigMind session per user data folder: a second start shows the running one.
@@ -744,8 +889,10 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, LPWSTR, int show) {
     wc.hCursor = LoadCursorW(nullptr, MAKEINTRESOURCEW(32512));  // IDC_ARROW (wide form; UNICODE is not defined)
     RegisterClassExW(&wc);
 
+    int start_x = CW_USEDEFAULT, start_y = CW_USEDEFAULT, start_w = 1440, start_h = 900;
+    initial_window_rect(start_x, start_y, start_w, start_h);
     g_hwnd = CreateWindowExW(0, kWindowClass, L"RigMind", WS_OVERLAPPEDWINDOW,
-                             CW_USEDEFAULT, CW_USEDEFAULT, 1440, 900,
+                             start_x, start_y, start_w, start_h,
                              nullptr, nullptr, instance, nullptr);
     if (!g_hwnd) return 1;
     SetPropW(g_hwnd, kInstanceProp, reinterpret_cast<HANDLE>(key_stamp(key)));

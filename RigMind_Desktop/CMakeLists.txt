@@ -13,6 +13,7 @@ add_library(rigmind_backend STATIC
     src/backend/password_hash.cpp
     src/backend/auth_service.cpp
     src/backend/alarm_recorder.cpp
+    src/backend/alert_metadata.cpp
     src/slm/slm_guard.cpp
     src/mcp/mcp_server.cpp
     third_party/sqlite3/sqlite3.c)
@@ -111,6 +112,12 @@ target_include_directories(tracking_test PRIVATE ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(tracking_test PRIVATE rigmind_backend)
 add_test(NAME tracking COMMAND tracking_test)
 
+# Per-camera pipeline state: frame slots with round robin, draw results by (camera, PTS), facts per camera (header-only).
+add_executable(multi_camera_test tests/multi_camera_test.cpp)
+target_include_directories(multi_camera_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/third_party/json)
+target_link_libraries(multi_camera_test PRIVATE rigmind_backend)
+add_test(NAME multi_camera COMMAND multi_camera_test)
+
 # Scene memory for the summary prompt (centroid paths, mask outlines, class names).
 add_executable(scene_test tests/scene_test.cpp)
 target_include_directories(scene_test PRIVATE ${CMAKE_SOURCE_DIR}/src)
@@ -122,6 +129,30 @@ add_executable(auth_test tests/auth_test.cpp)
 target_include_directories(auth_test PRIVATE ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(auth_test PRIVATE rigmind_backend)
 add_test(NAME auth COMMAND auth_test)
+
+# Zone based inference (polygon filter for the detection results).
+add_executable(zone_filter_test tests/zone_filter_test.cpp)
+target_include_directories(zone_filter_test PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(zone_filter_test PRIVATE rigmind_backend)
+add_test(NAME zone_filter COMMAND zone_filter_test)
+
+# Evidence chat retrieval (question -> evidence filter, prompt).
+add_executable(evidence_query_test tests/evidence_query_test.cpp)
+target_include_directories(evidence_query_test PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(evidence_query_test PRIVATE rigmind_backend)
+add_test(NAME evidence_query COMMAND evidence_query_test)
+
+# Evidence chat sessions: TOON text, LZ4 compression, storage.
+add_executable(chat_sessions_test tests/chat_sessions_test.cpp)
+target_include_directories(chat_sessions_test PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(chat_sessions_test PRIVATE rigmind_backend)
+add_test(NAME chat_sessions COMMAND chat_sessions_test)
+
+# Display-only mask stabiliser (no blinking or shimmering IDSS masks).
+add_executable(mask_stabilizer_test tests/mask_stabilizer_test.cpp)
+target_include_directories(mask_stabilizer_test PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(mask_stabilizer_test PRIVATE rigmind_backend)
+add_test(NAME mask_stabilizer COMMAND mask_stabilizer_test)
 
 # MCP module: protocol, tools, resources and the local HTTP transport.
 if(WIN32)

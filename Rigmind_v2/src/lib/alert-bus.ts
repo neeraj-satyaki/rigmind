@@ -1,7 +1,9 @@
 import { isNative, nativeCall } from "@/lib/native-bridge";
+import type { SummaryFields } from "@/lib/alert-text";
 
 export type AlertPhase = "Monitoring" | "Escalated" | "Open" | "Cleared";
-export type RaisedAlert = { id: string; severity: string; condition: string; place: string; phase?: AlertPhase };
+/** `condition` is a neutral level label ("Orange alert"), `place` the camera id. Host alerts also carry the facts metadata and the SLM summary (null until written). */
+export type RaisedAlert = { id: string; severity: string; condition: string; place: string; phase?: AlertPhase } & SummaryFields;
 /** Presents an alert (toast, bell, tone). Raising an id the bell already holds updates that item in place. */
 export const ALERT_RAISED = "rigmind:alert-raised";
 /** Changes an item the bell already holds without presenting it again (for example Cleared). */

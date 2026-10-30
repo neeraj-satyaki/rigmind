@@ -1,11 +1,13 @@
 #pragma once
 
 #include <optional>
+#include <functional>
 #include <string>
 
 #include "alarm_state.h"
 #include "audit_log.h"
 #include "auth_service.h"
+#include "chat_sessions.h"
 #include "event_store.h"
 
 namespace rigmind {
@@ -37,6 +39,11 @@ public:
     std::string handle_trusted(const std::string& request_json) { return handle_impl(request_json, true); }
 
     void set_auth_required(bool required) { auth_required_ = required; }
+    // Test mode of the bridge CLI: cheap password hashing for generated cases. Never used by the app.
+    void set_auth_rounds(std::uint32_t rounds) { auth_.set_iterations(rounds); }
+    // Called (on the calling thread) after a record was saved through records.set, with its key. The host uses it to push saved
+    // zones to the pipeline.
+    void set_record_hook(std::function<void(const std::string&)> hook) { record_hook_ = std::move(hook); }
     // True when sign-in is not required, or a session is active.
     bool authenticated() const;
 
@@ -57,10 +64,13 @@ private:
     AuditLog* audit_;
     AlarmStateMachine alarm_;
     AuthService auth_;
+    ChatSessions chats_;
     bool auth_required_ = false;
+    std::function<void(const std::string&)> record_hook_;
     std::optional<Session> session_;
     static constexpr std::int64_t kSessionMs = 12LL * 3600 * 1000; // a session lasts one shift
     int next_event_ = 2000;
+    int next_chat_ = 1;
 };
 
 } // namespace rigmind

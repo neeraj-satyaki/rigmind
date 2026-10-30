@@ -102,6 +102,13 @@ const char* kAuditActions[] = {"alarm.transition", "alarm.cycle", "alert.respond
                                "notification.tray", "stream.open", "stream.close", "app.start", "app.stop", "app.error", "slm.start",
                                "pipeline.start", "report.pdf", "mcp.start", "mcp.call", "mcp.set"};
 
+// The model's sentence of an alert row as {alertId, text, source, atMs}, or null while none was written.
+json summary_of(const json& alert) {
+    if (!alert.is_object() || !alert.contains("summary") || !alert["summary"].is_string()) return nullptr;
+    return {{"alertId", alert.value("id", std::string())}, {"text", alert["summary"]}, {"source", alert.value("summarySource", std::string("slm"))},
+            {"atMs", alert.value("summaryAt", std::int64_t{0})}};
+}
+
 } // namespace
 
 McpServer::McpServer(const std::string& db_path, McpHooks hooks) : hooks_(std::move(hooks)), store_(std::make_unique<EventStore>(db_path)) {
@@ -198,9 +205,9 @@ json McpServer::dispatch(const json& request) {
 json McpServer::tools_list() const {
     const json limit = {{"type", "integer"}, {"minimum", 1}, {"maximum", 500}};
     return json::array({
-        tool("list_alerts", "Raised alerts, newest first, each with severity, condition, place, status (Open/Monitoring/Escalated/Cleared/Acknowledged), owner and times.",
+        tool("list_alerts", "Raised alerts, newest first, each with severity, a neutral condition label (e.g. Orange alert), place (the camera id), status (Open/Monitoring/Escalated/Cleared/Acknowledged), owner, times, metadata (facts only: camera, peak level, cycle path, and for every state change the EWS facts true at that moment; for PPE the items not detected and the people count) and summary / summarySource / summaryAt (the on-device model's plain-English sentence, null until written).",
              schema({{"limit", limit}, {"status", {{"type", "string"}, {"description", "only alerts with this status or phase"}}}})),
-        tool("get_alert", "One alert with its event-cycle history (audit rows), the plain-language summary and its evidence.",
+        tool("get_alert", "One alert with its metadata (facts), event-cycle history (audit rows), the plain-language summary (written by the on-device model from the metadata) and its evidence.",
              schema({{"alertId", {{"type", "string"}}}}, {"alertId"})),
         tool("get_live_scene",
              "What the detection models see now: for every object its model, class name, tracker id, box, centroid, mask contour points and a centroid path (x, y, ms ago), in pixels of the frame size returned. Also a compact text form for prompts.",
@@ -209,7 +216,7 @@ json McpServer::tools_list() const {
              schema({{"limit", limit}, {"kind", {{"type", "string"}, {"enum", json::array({"video", "image"})}}}})),
         tool("get_evidence", "Files of one evidence set; with include_images, up to 3 JPEG/PNG images (under 1.5 MB each) come back as image content.",
              schema({{"path", {{"type", "string"}, {"description", "the path value from list_evidence, e.g. CAM-01/1793350666337"}}}, {"include_images", {{"type", "boolean"}}}, {"max_images", {{"type", "integer"}, {"minimum", 1}, {"maximum", 3}}}}, {"path"})),
-        tool("list_summaries", "Plain-language summaries written for alerts (source BitNet or Template), newest first.", schema({{"limit", limit}})),
+        tool("list_summaries", "Plain-language summaries the on-device model wrote for alerts, newest first.", schema({{"limit", limit}})),
         tool("report_summary", "Report-style totals for the last N days: alerts by severity and status, normal and critical event cycles, PPE advisories, evidence sets by kind, summaries by source.",
              schema({{"days", {{"type", "integer"}, {"minimum", 1}, {"maximum", 90}}}})),
         tool("list_reports", "Report files saved on this PC (PDF and CSV in Documents\\RigMind Reports).", schema(json::object())),
@@ -232,21 +239,21 @@ json McpServer::call_tool(const std::string& name, const json& args) {
         json alert;
         {
             std::lock_guard<std::mutex> lock(mutex_);
-            for (const json& row : store_->list_raised_alerts(500))
-                if (row.value("id", std::string()) == id) alert = row;
+            alert = store_->find_raised_alert(id);
         }
         if (alert.is_null()) throw std::runtime_error("no alert " + id);
         if (!hooks_.request_summary) throw std::runtime_error("summaries are not available");
         std::string cam;
-        if (hooks_.scene_cameras)
+        if (alert["metadata"].is_object()) cam = alert["metadata"].value("camera", std::string());
+        if (cam.empty() && hooks_.scene_cameras)
             for (const std::string& c : hooks_.scene_cameras())
                 if (id.rfind("ALM-" + c + "-", 0) == 0 || id.rfind("PPE-" + c + "-", 0) == 0) cam = c;
         const bool live = alert.value("phase", std::string()) != "Cleared";
-        json req = {{"alertId", id}, {"severity", alert.value("severity", std::string())}, {"condition", alert.value("condition", std::string())},
-                    {"place", alert.value("place", std::string())}, {"camId", cam}, {"sceneTs", live && !cam.empty() ? now() : 0}};
+        // The host builds the model prompt from the metadata stored for the alert id; only the scene time is passed on.
+        json req = {{"alertId", id}, {"severity", alert.value("severity", std::string())}, {"camId", cam}, {"sceneTs", live && !cam.empty() ? now() : 0}};
         const json answer = hooks_.request_summary(req, 120000);
         if (answer.is_null()) return text_result({{"alertId", id}, {"status", "pending"}, {"note", "no answer within 120 seconds; try list_summaries later"}});
-        return text_result({{"alertId", id}, {"status", "done"}, {"text", answer.value("text", std::string())}, {"source", answer.value("source", std::string("template"))}});
+        return text_result({{"alertId", id}, {"status", "done"}, {"text", answer.value("text", std::string())}, {"source", answer.value("source", std::string("unavailable"))}});
     }
 
     std::lock_guard<std::mutex> lock(mutex_);
@@ -325,18 +332,14 @@ json McpServer::scene_for(const json& args) {
 }
 
 json McpServer::alert_detail(const std::string& id) {
-    json alert;
-    for (const json& row : store_->list_raised_alerts(500))
-        if (row.value("id", std::string()) == id) alert = row;
+    const json alert = store_->find_raised_alert(id);
     if (alert.is_null()) throw std::runtime_error("no alert " + id);
     json history = json::array();
     for (const char* action : {"alarm.transition", "alarm.cycle", "alert.respond", "ppe.transition", "event.describe", "summary.ready", "notification.tray"})
         for (const json& r : store_->recent_audit(action, 1000))
             if (r.value("target", std::string()) == id) history.push_back(r);
     std::sort(history.begin(), history.end(), [](const json& x, const json& y) { return x.value("tsMs", std::int64_t{0}) < y.value("tsMs", std::int64_t{0}); });
-    json summary = nullptr;
-    for (const json& rec : store_->list_records("plain:" + id))
-        if (rec.value("key", std::string()) == "plain:" + id) summary = rec["value"];
+    json summary = summary_of(alert);
     // Evidence in the alert's time window (the footage table is by camera and time).
     json evidence = json::array();
     const std::int64_t from = alert.value("raisedMs", std::int64_t{0}) - 60000;
@@ -400,8 +403,11 @@ json McpServer::evidence_detail(const json& args, json& images) {
 
 json McpServer::summaries(int limit) {
     json rows = json::array();
-    for (const json& rec : store_->list_records("plain:")) rows.push_back(rec["value"]);
-    std::sort(rows.begin(), rows.end(), [](const json& a, const json& b) { return a.value("at", std::string()) > b.value("at", std::string()); });
+    for (const json& alert : store_->list_raised_alerts(500)) {
+        const json s = summary_of(alert);
+        if (s.is_object()) rows.push_back(s);
+    }
+    std::sort(rows.begin(), rows.end(), [](const json& a, const json& b) { return a.value("atMs", std::int64_t{0}) > b.value("atMs", std::int64_t{0}); });
     if (static_cast<int>(rows.size()) > limit) rows.erase(rows.begin() + limit, rows.end());
     return {{"count", rows.size()}, {"summaries", rows}};
 }
@@ -428,13 +434,12 @@ json McpServer::report_summary(int days) {
         if (f.value("timestampMs", std::int64_t{0}) < since) continue;
         (f.value("kind", std::string("video")) == "image" ? image : video)++;
     }
-    int slm = 0, tmpl = 0;
-    for (const json& rec : store_->list_records("plain:")) {
-        (rec["value"].value("source", std::string()) == "slm" ? slm : tmpl)++;
-    }
+    int slm = 0;
+    for (const json& a : store_->list_raised_alerts(500))
+        if (a.value("raisedMs", std::int64_t{0}) >= since && summary_of(a).is_object()) ++slm;
     return {{"days", days}, {"alerts", {{"total", alerts}, {"bySeverity", by_severity}, {"byStatus", by_status}}},
             {"eventCycles", {{"normal", normal}, {"critical", critical}}}, {"ppeAdvisories", ppe_raised},
-            {"evidence", {{"videoSets", video}, {"imageSets", image}}}, {"summaries", {{"bitnet", slm}, {"template", tmpl}}}};
+            {"evidence", {{"videoSets", video}, {"imageSets", image}}}, {"summaries", {{"bitnet", slm}}}};
 }
 
 json McpServer::list_report_files() const {

@@ -21,7 +21,9 @@ import { NoteDialog } from "@/components/rig/workflow";
 import { cn } from "@/lib/utils";
 import { demoOr } from "@/lib/demo-mode";
 import { isNative } from "@/lib/native-bridge";
-import { describeAlert, loadPlainSummaries, type PlainSummary } from "@/lib/plain-summary";
+import { requestSummary } from "@/lib/plain-summary";
+import { isHostRow } from "@/lib/alert-text";
+import { AlertDescription } from "@/components/rig/AlertDescription";
 import { useRealCameras, useStreamSources } from "@/lib/real-state";
 
 export const Route = createFileRoute("/_shell/alerts")({
@@ -38,28 +40,32 @@ const summary: { sev: Severity; count: string; note: string }[] = [
 function Alerts() {
   const { items, respond } = useAppState();
   const cams = useRealCameras(useStreamSources(false, isNative()));
-  // Plain-language summaries (BitNet or template) stored on this device, by alert id.
-  const [plain, setPlain] = useState<Record<string, PlainSummary>>({});
-  const [busy, setBusy] = useState<string>("");
-  const refreshPlain = () =>
-    loadPlainSummaries()
-      .then((list) => setPlain(Object.fromEntries(list.map((s) => [s.alertId, s]))))
-      .catch(() => {});
+  // 'Plain words' asks the host for a new SLM sentence; it appears on the alert row (polled every second). The button shows
+  // "Writing…" until the row's summary time changes.
+  const [busy, setBusy] = useState<Record<string, number | null>>({});
   useEffect(() => {
-    refreshPlain();
-    const timer = setInterval(refreshPlain, 5000); // automatic summaries arrive while this page is open
-    return () => clearInterval(timer);
-  }, []);
+    setBusy((b) => {
+      let changed = false;
+      const next = { ...b };
+      for (const [id, from] of Object.entries(b)) {
+        const row = items.find((a) => a.id === id);
+        if (!row || (row.summaryAt ?? null) !== from) {
+          delete next[id];
+          changed = true;
+        }
+      }
+      return changed ? next : b;
+    });
+  }, [items]);
   const summarise = async (a: (typeof items)[number]) => {
-    setBusy(a.id);
-    const place = [a.rig, a.area].filter(Boolean).join(" · ");
     // The alert's own camera (host alert ids are ALM-<camera>-... / PPE-<camera>-...); unknown = no camera, no scene.
     const cam = cams.find((c) => a.id.startsWith(`ALM-${c.id}-`) || a.id.startsWith(`PPE-${c.id}-`))?.id ?? "";
     // The scene is the camera's current view: only meaningful while the alert is still live.
     const live = a.status !== "Cleared" && a.status !== "Acknowledged";
-    await describeAlert({ id: a.id, severity: a.severity, condition: a.condition, place }, cam, place, () => {}, undefined, cam && live ? Date.now() : 0).catch(() => {});
-    await refreshPlain();
-    setBusy("");
+    const clear = () => setBusy((b) => Object.fromEntries(Object.entries(b).filter(([k]) => k !== a.id)));
+    setBusy((b) => ({ ...b, [a.id]: a.summaryAt ?? null }));
+    await requestSummary(a.id, cam && live ? Date.now() : 0).catch(clear);
+    window.setTimeout(clear, 360_000); // a model that never answers: stop showing "Writing…"
   };
   const [tab, setTab] = useState("open");
   const [sev, setSev] = useState("All severities");
@@ -80,7 +86,7 @@ function Alerts() {
           (sev === "All severities" || a.severity === sev) &&
           (rig === "All rigs" || a.rig === rig) &&
           (q === "" ||
-            `${a.id} ${a.condition} ${a.area} ${a.owner}`.toLowerCase().includes(q.toLowerCase())),
+            `${a.id} ${a.condition} ${a.area} ${a.owner} ${a.place ?? ""} ${a.summary ?? ""}`.toLowerCase().includes(q.toLowerCase())),
       ),
     [items, tab, sev, rig, q],
   );
@@ -194,14 +200,10 @@ function Alerts() {
                   <Chip tone={severityTone(a.severity)}>{a.severity}</Chip>
                 </td>
                 <td className={td}>
-                  <div className="font-medium">{a.condition}</div>
-                  <div className="text-xs text-muted-foreground">{a.area}</div>
-                  {plain[a.id] && (
-                    <div className="mt-1 max-w-md text-xs">
-                      {plain[a.id]!.text}{" "}
-                      <span className="text-muted-foreground">({plain[a.id]!.source === "slm" ? "BitNet" : "Template"})</span>
-                    </div>
-                  )}
+                  <div className="font-medium">
+                    <AlertDescription alert={a} />
+                  </div>
+                  {!isHostRow(a) && <div className="text-xs text-muted-foreground">{a.area}</div>}
                 </td>
                 <td className={td}>
                   <Mono>{a.age}</Mono>
@@ -225,7 +227,7 @@ function Alerts() {
                       </Link>
                     )}
                     {isNative() && (
-                      <Btn onClick={() => summarise(a)}>{busy === a.id ? "Writing…" : "Plain words"}</Btn>
+                      <Btn onClick={() => summarise(a)}>{a.id in busy ? "Writing…" : "Plain words"}</Btn>
                     )}
                     {a.status !== "Acknowledged" && (
                       <Btn onClick={() => respond(a.id, "Acknowledged")}>Acknowledge</Btn>

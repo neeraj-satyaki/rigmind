@@ -1,4 +1,4 @@
-import { createContext, useContext, useEffect, useState, type ReactNode } from "react";
+import { createContext, useContext, useEffect, useRef, useState, type ReactNode } from "react";
 import { toast } from "sonner";
 import { readDevice, writeDevice } from "@/lib/device-db";
 import { alerts, type Alert } from "@/data/mock";
@@ -6,6 +6,7 @@ import { isNative, nativeCall } from "@/lib/native-bridge";
 import { installUiAudit } from "@/lib/audit";
 import { demoDataEnabled } from "@/lib/demo-mode";
 import { currentOperator } from "@/lib/auth";
+import type { SummaryFields } from "@/lib/alert-text";
 
 // Sample alerts only when the installer option was ticked; otherwise the list starts empty and fills from the host.
 const seedAlerts = (): Alert[] => (demoDataEnabled() ? alerts : []);
@@ -13,14 +14,24 @@ const operatorName = () => (demoDataEnabled() ? "Faisal A." : currentOperator().
 const FEED_INTERVAL_MS = 1000;
 
 // One row of the backend alerts.feed: an alert the C++ backend raised, with its current status.
-type RaisedRow = { id: string; severity: Alert["severity"]; condition: string; place: string; status: Alert["status"]; owner: string; raisedMs: number };
+type RaisedRow = { id: string; severity: Alert["severity"]; condition: string; place: string; status: Alert["status"]; owner: string; raisedMs: number; updatedMs?: number; phase?: string } & SummaryFields;
+
+// Facts metadata and the SLM sentence of a host row (null until written). Sample rows never have these keys.
+const hostFields = (row: RaisedRow) => ({
+  place: row.place,
+  metadata: row.metadata ?? null,
+  summary: row.summary ?? null,
+  summarySource: row.summarySource ?? null,
+  summaryAt: row.summaryAt ?? null,
+  updatedMs: row.updatedMs ?? 0,
+});
 
 // "Demo rig 01 · Derrick board" -> rig and area, as the alert table shows them.
 function toAlert(row: RaisedRow, now: number): Alert {
   const [rig = "", area = ""] = row.place.split("·").map((part) => part.trim());
   const seconds = Math.max(0, Math.round((now - row.raisedMs) / 1000));
   const age = seconds < 60 ? `${seconds} s` : `${Math.floor(seconds / 60)} m ${String(seconds % 60).padStart(2, "0")} s`;
-  return { id: row.id, rig, area, severity: row.severity, condition: row.condition, age, owner: row.owner, status: row.status };
+  return { id: row.id, rig, area, severity: row.severity, condition: row.condition, age, owner: row.owner, status: row.status, ...hostFields(row) };
 }
 
 // Adds new raised alerts on top, and updates status/owner/age of known ones. Returns the same array when nothing changed.
@@ -31,8 +42,13 @@ function mergeFeed(old: Alert[], rows: RaisedRow[]): Alert[] {
   const updated = old.map((a) => {
     const r = byId.get(a.id);
     if (!r) return a;
-    const next = { ...a, status: r.status, owner: r.owner, severity: r.severity, condition: r.condition };
-    if (next.status !== a.status || next.owner !== a.owner || next.severity !== a.severity || next.condition !== a.condition) changed = true;
+    const next = { ...a, status: r.status, owner: r.owner, severity: r.severity, condition: r.condition, ...hostFields(r) };
+    // metadata changes only together with updatedMs (the host writes both in one step), so the cheap comparison is enough
+    if (
+      next.status !== a.status || next.owner !== a.owner || next.severity !== a.severity || next.condition !== a.condition ||
+      next.summary !== a.summary || next.summarySource !== a.summarySource || next.updatedMs !== a.updatedMs
+    )
+      changed = true;
     return next;
   });
   const known = new Set(old.map((a) => a.id));
@@ -87,13 +103,23 @@ export function AppState({ children }: { children: ReactNode }) {
     installUiAudit();
   }, []);
 
+  const firstTheme = useRef(true);
   useEffect(() => {
-    document.documentElement.classList.toggle("dark", dark);
+    const root = document.documentElement;
+    let glide: ReturnType<typeof setTimeout> | undefined;
+    if (!firstTheme.current) {
+      // not on the first paint: only when the person switches the theme, so the colours glide instead of snapping
+      root.classList.add("rm-theme-switching");
+      glide = setTimeout(() => root.classList.remove("rm-theme-switching"), 360);
+    }
+    firstTheme.current = false;
+    root.classList.toggle("dark", dark);
     try {
       localStorage.setItem("rm-theme", dark ? "dark" : "light"); // read by the head script so the next start paints the right theme (and boot splash) at once
     } catch {
       /* storage blocked: the saved preference still applies once loaded */
     }
+    return () => clearTimeout(glide);
   }, [dark]);
   return (
     <Context.Provider

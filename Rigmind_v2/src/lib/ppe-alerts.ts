@@ -1,11 +1,12 @@
 import { raiseAlert, updateAlert, type RaisedAlert } from "./alert-bus";
 import { onNativeEvent, type NativeEvent } from "./native-bridge";
-import { describeAlert } from "./plain-summary";
 
 /*
  * PPE compliance episodes. The pipeline checks every person for the required PPE and sends {"ev":"ppe"} when the set of
  * items NOT DETECTED changes (state "missing" | "ok"). The host (PpeRecorder) stores one Advisory alert row per episode and
- * adds alertId / phase / condition. The wording is always "not detected" (the camera may simply not see the item).
+ * adds alertId / phase / condition. The wording is always "not detected" (the camera may simply not see the item). The row holds a
+ * neutral label ("PPE items not detected"); the items and the people count are its metadata, and the host asks the SLM for the
+ * sentence when an episode opens.
  *
  *   first "missing" of an episode  -> yellow Advisory toast (once), bell row, inbox row (Open). No tone.
  *   the missing set changes        -> the bell row is updated in place; no new toast
@@ -25,7 +26,10 @@ export function resetPpeAlerts() {
 
 const str = (v: unknown) => (typeof v === "string" ? v : "");
 
-/** "PPE not detected: vest, gloves" */
+/** Neutral label of every PPE row. */
+export const PPE_LABEL = "PPE items not detected";
+
+/** Live chip text: the label with the items that are not detected, "PPE not detected: vest, gloves" (a list, not a sentence). */
 export function ppeCondition(missing: string[]): string {
   return `PPE not detected: ${missing.join(", ")}`;
 }
@@ -38,7 +42,8 @@ export function handlePpeEvent(msg: NativeEvent): RaisedAlert | undefined {
   const missing = Array.isArray(msg["missing"]) ? (msg["missing"] as unknown[]).filter((m): m is string => typeof m === "string") : [];
   const n = episodes.get(msg.cam) ?? 1;
   const id = str(msg["alertId"]) || `PPE-${msg.cam}-${boot}${n}`.slice(0, 32);
-  const condition = (str(msg["condition"]) || ppeCondition(missing)).slice(0, 128);
+  const condition = (str(msg["condition"]) || PPE_LABEL).slice(0, 128);
+  const hostFields = str(msg["alertId"]) ? { metadata: null, summary: null, summarySource: null } : {}; // rows the host stored carry these
   const place = msg.cam;
 
   if (state === "ok") {
@@ -54,9 +59,8 @@ export function handlePpeEvent(msg: NativeEvent): RaisedAlert | undefined {
     return;
   }
   presented.add(id);
-  const alert: RaisedAlert = { id, severity: "Advisory", condition, place, phase: "Open" };
+  const alert: RaisedAlert = { id, severity: "Advisory", condition, place, phase: "Open", ...hostFields };
   raiseAlert(alert, { persist: false }); // the host stored the row; this is the yellow toast and the bell row (Advisory has no tone)
-  describeAlert(alert, msg.cam, place, () => {}).catch(() => {}); // plain words for the report; stored, no extra toast
   return alert;
 }
 

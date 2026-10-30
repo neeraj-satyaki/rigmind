@@ -1,39 +1,76 @@
-import { listDevice, writeDevice } from "./device-db";
-import { nativeCall, onNativeEvent, type NativeEvent } from "./native-bridge";
-import type { RaisedAlert } from "./alert-bus";
+import { isNative, nativeCall, onNativeEvent } from "./native-bridge";
+import { alertDescription, summaryStatus, type SummaryFields, type SummaryStatus } from "./alert-text";
 
-/** Plain-language text for one raised alert: the SLM sentence, or the template text when the model gave none. */
+/*
+ * Plain-language text for alerts. The host builds the model prompt from the alert's stored metadata, asks the SLM (automatically for
+ * every Orange/Red cycle close, every Red opening and every PPE opening) and stores the sentence on the alert row. The page only
+ * reads it from there (alerts.feed / alert.get); the 'Plain words' button asks for a new one.
+ */
+
+/** One alert as the reports list it: the SLM sentence when it exists, else the label, camera and facts with a status. */
 export type PlainSummary = {
   alertId: string;
   severity: string;
   condition: string;
   place: string;
   camId: string;
+  /** The SLM sentence; empty until the model has written it. */
   text: string;
-  source: "slm" | "template";
+  /** Facts that were true (a plain list, not a sentence). */
+  facts: string;
+  source: "slm" | "none";
+  status: SummaryStatus;
+  /** "Summary pending" | "BitNet not available" | null */
+  chip: string | null;
   at: string;
 };
 
-type DescribeReply = { text: string; slm: boolean };
+/** An alerts.feed row. */
+export type FeedRow = {
+  id: string;
+  severity: string;
+  condition: string;
+  place: string;
+  phase?: string;
+  raisedMs: number;
+} & SummaryFields;
 
-/** Picks what to show for a host "description" event: its text from the SLM, else the template text. */
-export function resolveDescription(
-  msg: Record<string, unknown>,
-  templateText: string,
-): { text: string; source: "slm" | "template" } {
-  const text = msg["text"];
-  if (msg["source"] === "slm" && typeof text === "string" && text.trim()) return { text, source: "slm" };
-  return { text: templateText, source: "template" };
+/** Report line for one feed row; null for rows that get no summary (a Yellow-only stretch). */
+export function plainSummaryFromRow(row: FeedRow): PlainSummary | null {
+  const status = summaryStatus(row);
+  if (status === "none") return null;
+  const d = alertDescription(row);
+  const at = typeof row.summaryAt === "number" ? row.summaryAt : row.raisedMs;
+  return {
+    alertId: row.id,
+    severity: row.severity,
+    condition: row.condition,
+    place: row.place,
+    camId: row.metadata?.camera || row.place,
+    text: d.isSummary ? d.text : "",
+    facts: d.facts,
+    source: d.isSummary ? "slm" : "none",
+    status,
+    chip: d.chip,
+    at: new Date(Number.isFinite(at) ? at : 0).toISOString(),
+  };
 }
 
-const key = (alertId: string) => `plain:${alertId}`;
-export const savePlainSummary = (s: PlainSummary) => writeDevice(key(s.alertId), s);
+/** The text a report shows for one alert: the sentence, or label · camera · facts. */
+export const summaryReportText = (s: PlainSummary) => s.text || [s.condition, s.camId, s.facts].filter(Boolean).join(" · ");
+
+/** Alerts that have (or await) a plain-language summary, oldest first, read from the host rows. Empty outside the desktop host. */
 export async function loadPlainSummaries(): Promise<PlainSummary[]> {
-  const rows = await listDevice<PlainSummary>("plain:");
-  return rows.map((r) => r.value).sort((a, b) => a.at.localeCompare(b.at));
+  if (!isNative()) return [];
+  const rows = await nativeCall<FeedRow[]>("alerts.feed", { limit: 500 });
+  if (!Array.isArray(rows)) return [];
+  return rows
+    .map(plainSummaryFromRow)
+    .filter((s): s is PlainSummary => s !== null)
+    .sort((a, b) => a.at.localeCompare(b.at));
 }
 
-/** Report text for one summary, e.g. "EV-2001 · Critical · Platform-elevator collision". */
+/** Report text for one summary, e.g. "EV-2001 · Critical · Red alert". */
 export const summaryLabel = (s: PlainSummary) => `${s.alertId} · ${s.severity} · ${s.condition}`;
 
 /** Row shape of the CSV export. */
@@ -42,71 +79,27 @@ export const plainSummaryCsvRows = (list: PlainSummary[]) =>
     "Alert ID": s.alertId,
     Time: s.at,
     Severity: s.severity,
-    Condition: s.condition,
-    "Camera · place": [s.camId, s.place].filter(Boolean).join(" · "),
+    "Level label": s.condition,
+    "Camera · place": [s.camId, s.place].filter((v, i, a) => v && a.indexOf(v) === i).join(" · "),
+    "Facts": s.facts,
     "Plain-language summary": s.text,
-    Source: s.source === "slm" ? "BitNet" : "Template",
+    Source: s.source === "slm" ? "BitNet" : (s.chip ?? ""),
   }));
 
-const SLM_WAIT_MS = 300_000; // summaries queue behind each other on the CPU
+/** Asks the host for a new sentence for one alert (the 'Plain words' button). The text arrives on the alert row. */
+export function requestSummary(alertId: string, sceneAtMs = 0) {
+  return nativeCall<{ alertId: string; slm: boolean }>("event.describe", { alertId, tsMs: Date.now(), sceneTs: sceneAtMs });
+}
 
-/**
- * Asks the host for plain words for one alert, then calls show(text) once: the template text at once when
- * no model runs, otherwise the model sentence (or the template text if it never answers). The result is
- * stored so reports can include it.
- *
- * The listener is registered before the call: the host may send the description event before its reply.
- */
-export async function describeAlert(
-  a: RaisedAlert,
-  camId: string,
-  place: string,
-  show: (text: string, source: "slm" | "template") => void,
-  waitMs = SLM_WAIT_MS,
-  /** When the alert happened, for the scene shown to the model; 0 = no scene (an old alert). Default: now. */
-  sceneAtMs: number = Date.now(),
-) {
-  let early: NativeEvent | undefined;
-  let deliver: ((msg: NativeEvent) => void) | undefined;
-  const off = onNativeEvent((msg) => {
-    if (msg.ev !== "description" || msg["alertId"] !== a.id) return;
-    if (deliver) deliver(msg);
-    else early = msg;
+/** One alert row from the host (metadata and summary included); null when unknown. */
+export async function fetchAlertRow(alertId: string): Promise<FeedRow | null> {
+  const row = await nativeCall<FeedRow | null>("alert.get", { id: alertId });
+  return row && typeof row === "object" ? row : null;
+}
+
+/** Calls onDescription(alertId) whenever the host reports a finished summary (any alert). Returns the unsubscribe function. */
+export function onSummaryReady(onDescription: (alertId: string) => void): () => void {
+  return onNativeEvent((msg) => {
+    if (msg.ev === "description" && typeof msg["alertId"] === "string") onDescription(msg["alertId"] as string);
   });
-  try {
-    const reply = await nativeCall<DescribeReply>("event.describe", {
-      alertId: a.id,
-      severity: a.severity,
-      condition: a.condition,
-      place,
-      camId,
-      tsMs: Date.now(),
-      sceneTs: sceneAtMs,
-    });
-    const finish = (msg: Record<string, unknown>) => {
-      off();
-      const r = resolveDescription(msg, reply.text);
-      show(r.text, r.source);
-      savePlainSummary({
-        alertId: a.id,
-        severity: a.severity,
-        condition: a.condition,
-        place,
-        camId,
-        text: r.text,
-        source: r.source,
-        at: new Date().toISOString(),
-      }).catch((e) => console.warn("plain summary not stored", e));
-    };
-    if (!reply.slm) return finish({ text: null, source: "template" });
-    if (early) return finish(early);
-    const timer = setTimeout(() => finish({ text: null, source: "template" }), waitMs);
-    deliver = (msg) => {
-      clearTimeout(timer);
-      finish(msg);
-    };
-  } catch (e) {
-    off();
-    console.warn("event.describe failed", e);
-  }
 }

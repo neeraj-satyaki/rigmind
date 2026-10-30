@@ -62,6 +62,19 @@ describe("sample data off", () => {
     expect(ev[0]!.cleared).toBe(false);
   });
 
+  it("the host's capital state names work, and the event keeps the label of its peak level after the cycle closes", () => {
+    const ev = eventsFromTransitions([
+      row(3, 3000, "ORANGE", "YELLOW", { condition: "Yellow monitoring", severity: "Warning", alertId: "ALM-3" }),
+      row(2, 2000, "YELLOW", "ORANGE", { condition: "Orange alert", severity: "Warning", alertId: "ALM-3" }),
+      row(1, 1000, "NONE", "YELLOW", { condition: "Yellow monitoring", severity: "Advisory", alertId: "ALM-3" }),
+      row(5, 5000, "YELLOW", "NONE", { condition: "Cleared", severity: "Advisory", alertId: "ALM-4" }),
+    ]);
+    const e3 = ev.find((e) => e.id === "ALM-3")!;
+    expect(e3.condition).toBe("Orange alert");
+    expect(e3.steps.map((s) => s.to)).toEqual(["Yellow", "Orange", "Yellow"]);
+    expect(ev.find((e) => e.id === "ALM-4")!.cleared).toBe(true);
+  });
+
   it("starts with no alerts instead of the sample alerts", async () => {
     await act(async () => {
       render(

@@ -1,8 +1,5 @@
-import { toast } from "sonner";
-import { alertToastOptions } from "@/lib/alert-colors";
 import { raiseAlert, updateAlert, type AlertPhase, type RaisedAlert } from "./alert-bus";
 import { isNative, onNativeEvent, type NativeEvent } from "./native-bridge";
-import { describeAlert } from "./plain-summary";
 import { setAlertLoop } from "./alert-sound";
 
 /** EWS alarm state -> app alert severity (same names the alert inbox and tones use). */
@@ -14,12 +11,14 @@ const LEVEL: Record<Live, number> = { Yellow: 0, Orange: 1, Red: 2 };
  * Episode model: one alert per episode, escalating in place.
  * Event cycle: Yellow>Orange>Yellow is a normal cycle; Yellow>Orange>Red>Orange>Yellow and Yellow>Orange>Red>Yellow are critical
  * cycles. Falling back to Yellow ends the cycle (the host sends closed:{alertId,peak,critical,cycle}); that Yellow opens the next
- * item. A closed cycle is marked Cleared and gets a plain-language summary of the whole cycle.
+ * item. A closed cycle is marked Cleared. Its plain-language summary is requested and stored by the host (also with the page closed);
+ * the page shows it from the alert row.
  *   Yellow = "monitoring" (quiet: no toast, no bell, no tone; the item sits in the inbox as Monitoring)
  *   Orange = Warning, Escalated: toast + bell entry
- *   Red    = Critical, Escalated: toast + bell entry + red tone + OS notification + plain-language description
+ *   Red    = Critical, Escalated: toast + bell entry + red tone + OS notification
  *   None   = the episode is Cleared (the item stays in history); the next non-None state opens a new item.
- * The host (alarm_recorder.cpp) records every transition and sends alertId / phase / escalation. When those
+ * Alert text is facts only: `condition` is a neutral level label ("Orange alert"), `place` the camera id. The facts and the SLM
+ * sentence come from the host row (see alert-text.ts). The host (alarm_recorder.cpp) records every transition and sends alertId / phase / escalation. When those
  * fields are missing (plain browser or an older host) the same episode logic runs here.
  */
 type CamEpisode = { n: number; last: string };
@@ -40,7 +39,7 @@ export function resetAlarmAlerts() {
 function osNotify(a: RaisedAlert) {
   try {
     if (typeof Notification === "undefined") return;
-    const show = () => new Notification(`Critical safety event: ${a.condition}`, { body: `${a.id} · ${a.place}`, tag: a.id });
+    const show = () => new Notification(`${a.condition} · ${a.place}`, { body: a.id, tag: a.id });
     if (Notification.permission === "granted") show();
     else if (Notification.permission === "default")
       void Notification.requestPermission().then((p) => p === "granted" && show()).catch(() => {});
@@ -55,30 +54,16 @@ const str = (v: unknown) => (typeof v === "string" ? v : "");
 const CYCLE_NAME: Record<string, string> = { Y: "Yellow", O: "Orange", R: "Red", N: "clear" };
 export const cycleWords = (path: string) => path.split(">").map((p) => CYCLE_NAME[p] ?? p).join(", ");
 
-/** Marks a finished event cycle Cleared and asks for its summary. Runs once per alert id. */
-function closeCycle(cam: string, closed: Record<string, unknown>, place: string, condition: string) {
+/** Neutral label of a level: no sentence about what happened. */
+export const levelLabel = (level: number) => (level >= 2 ? "Red alert" : level === 1 ? "Orange alert" : "Yellow monitoring");
+
+/** Marks a finished event cycle Cleared; the row keeps its peak level label. The host writes the summary. Runs once per alert id. */
+function closeCycle(closed: Record<string, unknown>, place: string) {
   const id = str(closed["alertId"]);
   if (!id || cleared.has(id)) return;
   cleared.add(id);
   const peak = typeof closed["peak"] === "number" ? (closed["peak"] as number) : 0;
-  const critical = closed["critical"] === true;
-  const severity = ALARM_SEVERITY[levelName(peak)];
-  updateAlert({ id, severity, condition, place, phase: "Cleared" });
-  if (peak < 1) return; // a Yellow-only stretch is not an event cycle
-  const cycle = str(closed["cycle"]);
-  const alert: RaisedAlert = {
-    id,
-    severity,
-    condition: `${critical ? "Critical" : "Normal"} event cycle (${cycleWords(cycle)}): ${condition}`.slice(0, 128),
-    place,
-    phase: "Cleared",
-  };
-  describeAlert(alert, cam, place, (text) =>
-    toast(`${id} cycle summary`, {
-      description: text,
-      ...alertToastOptions(severity),
-    }),
-  ).catch(() => {});
+  updateAlert({ id, severity: ALARM_SEVERITY[levelName(peak)], condition: levelLabel(peak), place, phase: "Cleared" });
 }
 
 /**
@@ -96,13 +81,15 @@ export function handleAlarmEvent(msg: NativeEvent): RaisedAlert | undefined {
   const hostId = str(msg["alertId"]);
   const localId = `ALM-${msg.cam}-${boot}${ep.n}`.slice(0, 32);
   const id = hostId || localId;
-  const place = str(msg["place"]).slice(0, 128);
-  const condition = (str(msg["condition"]) || "Safety condition detected").slice(0, 128);
+  const place = (str(msg["place"]) || msg.cam).slice(0, 128);
+  const condition = (str(msg["condition"]) || (state === "None" ? "Cleared" : levelLabel(LEVEL[state]))).slice(0, 128);
+  // Rows the host stored carry metadata / summary (null until written); a plain browser has none.
+  const hostFields = hostId ? { metadata: null, summary: null, summarySource: null } : {};
 
   const closed = msg["closed"];
   if (closed && typeof closed === "object") {
     ep.n++; // the next non-None state starts a new item (local ids)
-    closeCycle(msg.cam, closed as Record<string, unknown>, place, condition);
+    closeCycle(closed as Record<string, unknown>, place);
   }
 
   if (state === "None") {
@@ -111,7 +98,8 @@ export function handleAlarmEvent(msg: NativeEvent): RaisedAlert | undefined {
     if (!wasOpen || cleared.has(id)) return;
     cleared.add(id);
     ep.n++; // the next non-None state starts a new episode (local ids)
-    updateAlert({ id, severity: ALARM_SEVERITY[levelName(presented.get(id) ?? 0)], condition, place, phase: "Cleared" });
+    const shownLevel = presented.get(id) ?? 0;
+    updateAlert({ id, severity: ALARM_SEVERITY[levelName(shownLevel)], condition: levelLabel(shownLevel), place, phase: "Cleared" });
     return;
   }
 
@@ -122,16 +110,10 @@ export function handleAlarmEvent(msg: NativeEvent): RaisedAlert | undefined {
   if (level === 0 || (shown !== undefined && shown >= level)) return; // Yellow is quiet; repeats change nothing
   presented.set(id, level);
   const phase: AlertPhase = "Escalated";
-  const alert: RaisedAlert = { id, severity: ALARM_SEVERITY[state], condition, place, phase };
+  const alert: RaisedAlert = { id, severity: ALARM_SEVERITY[state], condition: levelLabel(level), place, phase, ...hostFields };
   raiseAlert(alert, { persist: false }); // the host already stored the row; this is toast + bell + tone
   if (state === "Red") {
     if (!isNative()) osNotify(alert); // inside the desktop app the host raises the Windows notification from the tray icon
-    describeAlert(alert, msg.cam, alert.place, (text) =>
-      toast(`${alert.id} in plain words`, {
-        description: text,
-        ...alertToastOptions(alert.severity),
-      }),
-    ).catch(() => {});
   }
   return alert;
 }

@@ -15,7 +15,6 @@ import {
 } from "recharts";
 import { Download } from "lucide-react";
 import { Btn, Callout, Card, CardHead, Chip, Kpi, PageHeader, Select } from "./ui";
-import { NoteDialog } from "./workflow";
 import { severityTrend as demoTrend, heatmap, eventsByType, cameras as demoCameras } from "@/data/mock";
 import { useCameras } from "@/lib/camera-status";
 import { isNative } from "@/lib/native-bridge";
@@ -55,11 +54,6 @@ function AnalyticsNav({ overview = false }: { overview?: boolean }) {
       <Link to="/analytics/overview">
         <Btn variant={overview ? "primary" : "ghost"}>Event overview</Btn>
       </Link>
-      <NoteDialog
-        title="Model quality"
-        label="Model quality"
-        text="Detection quality has not been measured. Site-approved validation is required before production expansion."
-      />
     </div>
   );
 }
