@@ -311,16 +311,6 @@ export function Notifications() {
           </Link>
           <Btn
             onClick={() =>
-              toast("Background push is not connected", {
-                description:
-                  "Connect Firebase Cloud Messaging to receive events while RigMind is closed.",
-              })
-            }
-          >
-            Enable push
-          </Btn>
-          <Btn
-            onClick={() =>
               isNative()
                 ? runNativeDetection(realCam)
                 : raiseAlert({

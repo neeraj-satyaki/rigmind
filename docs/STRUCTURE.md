@@ -44,7 +44,7 @@ RigMind_Desktop/                native host, pipeline, installer, tests
                                 ews_facts.h, ppe_check.h, bytetrack.h, platform_overlay.*, overlay_draw.*
                                 plugins/ews  (GStreamer element `rigmindews`)
   src/stream/                   pipeline process + router (host side)
-  src/slm/                      optional BitNet/llama server client (not shipped in the Windows installer)
+  src/slm/                      BitNet/llama server client, sentence guard, scene prompt text
   src/host/bridge_cli.cpp       backend without UI (tests, Linux host)
   models/                       ppe.onnx, idss_model.onnx (Git LFS), inference.json (source) and inference.cfg (encoded settings)
   scripts/                      inference_cfg.py (encode/check), stage_web.ps1, stage_runtime.ps1, stage_gpu_runtime.ps1, packaging
@@ -115,7 +115,9 @@ Host → page events: `status stats answer peer detections inference facts laten
 
 * The camera feed delivers about 3–6 frames per second with bursts; smoothness is limited by the source, and the inference gate trades frame rate for overlay accuracy.
 * Saved zones are stored but do not affect detection or alarms yet.
-* BitNet summaries are not installed on Windows: plain summaries use a template sentence grounded in the real fields.
+* BitNet summaries (Windows): `llama-server.exe` (bitnet.cpp, built with clang; see `RigMind_Desktop/third_party/bitnet-windows-build.patch`) ships in `slm\`; the model is downloaded by the installer on request. Slow on a busy CPU (7-40 s); the sentence is checked by `slm_guard`, a fixed action sentence is added by severity when missing, and the template text stands otherwise.
+* Event cycles: Yellow>Orange>Yellow (normal), Yellow>Orange>Red>Orange>Yellow or Yellow>Orange>Red>Yellow (critical). A fall back to Yellow after Orange/Red closes the alert row and opens the next; `alarm.cycle` audit row; the closed cycle is summarised.
+* Scene memory (`pipeline/scene_trail.h`, `slm/scene_text.h`): per object class name, box, mask contour and centroid path, sent about once a second to the host and added to the summary prompt.
 * Red depends on the IDSS mask-contour collision or the position rules; the footage used for testing never reaches Red.
 * Acknowledgement times, rig names/regions and user accounts are not provided by the host (shown as "—" or "Operator").
 * The visible e2e driver's wizard clicking was not proven end to end (a person clicked the wizard during the run); its settings-restart check disagrees with manual tests.

@@ -1,0 +1,55 @@
+diff --git a/3rdparty/llama.cpp b/3rdparty/llama.cpp
+--- a/3rdparty/llama.cpp
++++ b/3rdparty/llama.cpp
+@@ -1 +1 @@
+-Subproject commit 1f86f058de0c3f4098dedae2ae8653c335c868a1
++Subproject commit 1f86f058de0c3f4098dedae2ae8653c335c868a1-dirty
+diff --git a/src/ggml-bitnet-mad.cpp b/src/ggml-bitnet-mad.cpp
+index 4ba9d65..ad18bac 100644
+--- a/src/ggml-bitnet-mad.cpp
++++ b/src/ggml-bitnet-mad.cpp
+@@ -808,7 +808,7 @@ void ggml_vec_dot_i2_i8_s_Nx1(int n, float * s, size_t bs, const void * vx, size
+             accu[iy] = _mm256_setzero_si256();
+         }
+ 
+-        int8_t * y_col = y + col * by;
++        const int8_t * y_col = y + col * by;
+         
+         for (int i = 0; i < group32_num; i++) {
+             const uint8_t *px = x + i * 1024;
+diff --git a/common/common.cpp b/common/common.cpp
+index 451307b55..3eb96b4fb 100644
+--- a/common/common.cpp
++++ b/common/common.cpp
+@@ -2,6 +2,7 @@
+ #define _SILENCE_CXX17_CODECVT_HEADER_DEPRECATION_WARNING
+ #endif
+ 
++#include <chrono>
+ #include "common.h"
+ #include "log.h"
+ // Change JSON_ASSERT from assert() to GGML_ASSERT:
+diff --git a/common/common.h b/common/common.h
+index 5507b1c59..5f07c3f3e 100644
+--- a/common/common.h
++++ b/common/common.h
+@@ -144,8 +144,8 @@ struct common_sampler_params {
+ struct common_params {
+     int32_t n_predict             =    -1; // new tokens to predict
+     int32_t n_ctx                 =     0; // context size
+-    int32_t n_batch               =  2048; // logical batch size for prompt processing (must be >=32 to use BLAS)
+-    int32_t n_ubatch              =   512; // physical batch size for prompt processing (must be >=32 to use BLAS)
++    int32_t n_batch               =  32;   // logical batch size for prompt processing (must be >=32 to use BLAS)
++    int32_t n_ubatch              =   32;   // physical batch size for prompt processing (must be >=32 to use BLAS)
+     int32_t n_keep                =     0; // number of tokens to keep from initial prompt
+     int32_t n_draft               =     5; // number of tokens to draft during speculative decoding
+     int32_t n_chunks              =    -1; // max number of chunks to process (-1 = unlimited)
+diff --git a/common/log.cpp b/common/log.cpp
+index 04c7c0ed1..674d0c2ec 100644
+--- a/common/log.cpp
++++ b/common/log.cpp
+@@ -1,3 +1,4 @@
++#include <chrono>
+ #include "log.h"
+ 
+ #include <condition_variable>

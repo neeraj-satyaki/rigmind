@@ -10,7 +10,7 @@
 ## Camera and navigation updates
 - [x] Make stream validation and zone assignment steps interactive
 - [x] Bell event dropdown and toast notifications
-- [ ] Background push notifications — blocked: Firebase connection was declined
+- [x] Alert notifications — stored in the on-device SQLite database and delivered by the desktop host (toast, bell, tone, tray); no cloud push service
 - [x] Dark theme and navigation search suggestions
 - [x] Detailed mock user profile and logout
 - [x] Satyaki wordmark, requested footer, remove DEMO and Safety workspace

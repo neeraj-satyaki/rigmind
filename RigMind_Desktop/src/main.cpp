@@ -15,7 +15,9 @@
 #include <ctime>
 #include <filesystem>
 #include <functional>
+#include <map>
 #include <memory>
+#include <mutex>
 #include <stdexcept>
 #include <string>
 
@@ -127,6 +129,7 @@ bool handle_report_pdf(const std::string& text) {
         return true;
     }
     std::string name = request.contains("params") && request["params"].is_object() ? request["params"].value("name", std::string("report")) : "report";
+    if (g_audit) g_audit->record("backend", "report.pdf", name.substr(0, 64), "save requested", now_ms());
     std::string clean;
     for (char c : name) clean += (std::isalnum(static_cast<unsigned char>(c)) || c == '-' || c == '_') ? c : '-';
     if (clean.empty()) clean = "report";
@@ -262,10 +265,60 @@ void create_webview() {
     if (FAILED(hr)) throw std::runtime_error("WebView2 environment could not be created");
 }
 
+// App activity for the audit trail: camera state changes, pipeline errors, evidence clips, peer connections and the source of
+// every plain-language summary. Detections and other high-rate lines are skipped before any parsing.
+void audit_activity(const std::string& line) {
+    if (!g_audit) return;
+    static const char* kKinds[] = {"\"ev\":\"status\"", "\"ev\":\"error\"", "\"ev\":\"clip\"", "\"ev\":\"evidence\"",
+                                   "\"ev\":\"peer\"", "\"ev\":\"description\""};
+    bool wanted = false;
+    for (const char* k : kKinds) wanted = wanted || line.find(k) != std::string::npos;
+    if (!wanted || line.size() > 4096) return;
+    try {
+        const auto e = nlohmann::json::parse(line);
+        const std::string kind = e.value("ev", std::string());
+        const std::string cam = e.value("cam", std::string());
+        static std::mutex mutex;
+        static std::map<std::string, std::string> last;
+        std::lock_guard<std::mutex> lock(mutex);
+        if (kind == "status") {
+            const std::string state = e.value("state", std::string());
+            if (last[cam] == state) return; // only changes
+            last[cam] = state;
+            g_audit->record("backend", "camera.status", cam, state + (e.value("reason", std::string()).empty() ? "" : " | " + e.value("reason", std::string())), now_ms());
+        } else if (kind == "error") {
+            g_audit->record("backend", "app.error", cam, e.value("message", std::string()).substr(0, 400), now_ms());
+        } else if (kind == "clip") {
+            g_audit->record("backend", "evidence.saved", cam, e.value("stamp", std::string()) + " | " + std::to_string(e.value("count", 0)) + " files", now_ms());
+        } else if (kind == "evidence") {
+            g_audit->record("backend", "evidence.started", cam, e.value("stamp", std::string()), now_ms());
+        } else if (kind == "peer") {
+            const int connection = e.value("connection", -1);
+            const std::string key = "peer:" + cam;
+            const std::string state = std::to_string(connection);
+            if (last[key] == state) return;
+            last[key] = state;
+            g_audit->record("backend", "viewer.connection", cam, "state " + state, now_ms());
+        } else if (kind == "description") {
+            g_audit->record("backend", "summary.ready", e.value("alertId", std::string()), e.value("source", std::string("template")) + (e.value("action_added", false) ? " | action added" : "") + (e.value("reason", std::string()).empty() ? "" : " | rejected: " + e.value("reason", std::string())), now_ms());
+        }
+    } catch (const std::exception&) {
+    }
+}
+
 // Every host line (pipeline answers, clip reports, SLM descriptions) goes to the page through the window.
 // Alarm lines are first recorded by the host (alarm_events, audit trail, the episode's single alert row), so the
 // history is complete even when the page is closed. The enriched line (alertId, phase, escalation) goes on to the page.
 void post_line(const std::string& line) {
+    // Scene lines (objects, outlines, centroid paths) feed the summary prompt only; the page never needs them.
+    if (line.find("\"ev\":\"scene\"") != std::string::npos && line.find("\"objects\"") != std::string::npos) {
+        try {
+            if (g_router) g_router->note_scene(nlohmann::json::parse(line));
+        } catch (const std::exception&) {
+        }
+        return;
+    }
+    audit_activity(line);
     std::string forwarded;
     if (g_recorder && line.find("\"alarm\"") != std::string::npos) {
         try {
@@ -351,12 +404,20 @@ void init_backend() {
                                                        (exe_dir() / L"librigmindews.dll").wstring(),
                                                        (exe_dir() / L"models").wstring(), post_line);
         open_saved_cameras();
+        g_audit->record("backend", "pipeline.start", "", "rigmind-pipeline", now_ms());
     } catch (const std::exception&) {
         g_pipeline.reset();
     }
-    g_slm = std::make_unique<SlmClient>((exe_dir() / L"slm" / L"llama-server.exe").wstring(),
-                                        (exe_dir() / L"slm" / L"ggml-model-i2_s.gguf").wstring(), 8791, post_line);
-    if (!g_slm->running()) g_slm.reset();
+    // BitNet needs the server and the model (the installer downloads the model); without either, summaries use the template text.
+    const auto slm_exe = exe_dir() / L"slm" / L"llama-server.exe";
+    const auto slm_model = exe_dir() / L"slm" / L"ggml-model-i2_s.gguf";
+    if (std::filesystem::exists(slm_exe) && std::filesystem::exists(slm_model)) {
+        g_slm = std::make_unique<SlmClient>(slm_exe.wstring(), slm_model.wstring(), 8791, post_line);
+        g_audit->record("backend", "slm.start", "bitnet", g_slm->running() ? "running" : "failed to start (template text)", now_ms());
+        if (!g_slm->running()) g_slm.reset();
+    } else {
+        g_audit->record("backend", "slm.start", "bitnet", "not installed (template text)", now_ms());
+    }
     g_router = std::make_unique<StreamRouter>(g_pipeline.get(), g_slm.get(), post_line);
     g_bridge = std::make_unique<rigmind::Bridge>(*g_store, g_router.get(), g_audit.get());
 }
@@ -461,10 +522,12 @@ void notify_from_line(const std::string& line) {
             if (condition.empty()) condition = "Safety condition detected";
             const std::wstring title = to_wide(state + (state == "Red" ? " alarm" : " warning") + (cam.empty() ? "" : " - " + cam));
             tray_notify(title, to_wide(condition + (place.empty() ? "" : " - " + place)), state == "Red" ? 2 : 1, false);
+            if (g_audit) g_audit->record("backend", "notification.tray", cam, state + " | " + condition, now_ms());
         } else if (kind == "ppe") {
             if (event.value("phase", std::string()) != "Open") return;
             if (condition.empty()) condition = "PPE not detected";
             tray_notify(to_wide("Advisory" + (cam.empty() ? std::string() : " - " + cam)), to_wide(condition), 0, true);
+            if (g_audit) g_audit->record("backend", "notification.tray", cam, "Advisory | " + condition, now_ms());
         }
     } catch (const std::exception&) {
         // Not valid JSON: nothing to announce.

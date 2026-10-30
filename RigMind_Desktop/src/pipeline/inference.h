@@ -25,6 +25,7 @@
 #include "backend/alarm_state.h"
 #include "pipeline/draw_types.h"
 #include "pipeline/ppe_check.h"
+#include "pipeline/scene_trail.h"
 
 namespace rigmind {
 
@@ -106,6 +107,8 @@ private:
     std::vector<DrawResult> history_[2];                              // per model (ppe, idss): newest last, a few frames
     std::vector<std::pair<std::int64_t, std::chrono::steady_clock::time_point>> arrivals_; // key -> when it reached the tap
     void publish(DrawResult result);
+    SceneTrail scene_;                         // latest objects, outlines and centroid paths of both models
+    std::atomic<std::int64_t> scene_emit_ms_{0};
     std::mutex persons_mutex_;                 // IDSS worker -> PPE worker: tracked 'derrickman' boxes for the PPE check
     std::vector<PpePerson> persons_;
     std::int64_t persons_ts_ = 0;

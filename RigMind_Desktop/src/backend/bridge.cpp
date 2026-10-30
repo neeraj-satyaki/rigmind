@@ -169,7 +169,9 @@ std::string Bridge::handle(const std::string& request_json) {
             // must contain. The chat system message (host and harness) fixes the output format.
             const std::string prompt =
                 "Event: " + facts + "\nWrite one plain sentence for a site supervisor. Name the camera and the place, "
-                "say what happened, and say what must be done. No jargon.";
+                "say what happened, and end with the action the supervisor must take (for example check the area, "
+                "stop the work, or confirm that everyone wears the required PPE). When a scene list follows, use only "
+                "what it shows (which things are where and how they moved); never invent anything. No jargon.";
             const bool requested = stream_ != nullptr && stream_->can_describe();
             if (requested) {
                 stream_->send({{"cmd", "describe"}, {"alertId", alert_id}, {"prompt", prompt},

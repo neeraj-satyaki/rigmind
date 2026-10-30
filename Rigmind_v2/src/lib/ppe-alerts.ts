@@ -1,5 +1,6 @@
 import { raiseAlert, updateAlert, type RaisedAlert } from "./alert-bus";
 import { onNativeEvent, type NativeEvent } from "./native-bridge";
+import { describeAlert } from "./plain-summary";
 
 /*
  * PPE compliance episodes. The pipeline checks every person for the required PPE and sends {"ev":"ppe"} when the set of
@@ -55,6 +56,7 @@ export function handlePpeEvent(msg: NativeEvent): RaisedAlert | undefined {
   presented.add(id);
   const alert: RaisedAlert = { id, severity: "Advisory", condition, place, phase: "Open" };
   raiseAlert(alert, { persist: false }); // the host stored the row; this is the yellow toast and the bell row (Advisory has no tone)
+  describeAlert(alert, msg.cam, place, () => {}).catch(() => {}); // plain words for the report; stored, no extra toast
   return alert;
 }
 

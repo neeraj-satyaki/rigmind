@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { Search, SlidersHorizontal } from "lucide-react";
 import {
@@ -20,6 +20,9 @@ import { useAppState } from "@/components/rig/AppState";
 import { NoteDialog } from "@/components/rig/workflow";
 import { cn } from "@/lib/utils";
 import { demoOr } from "@/lib/demo-mode";
+import { isNative } from "@/lib/native-bridge";
+import { describeAlert, loadPlainSummaries, type PlainSummary } from "@/lib/plain-summary";
+import { useRealCameras, useStreamSources } from "@/lib/real-state";
 
 export const Route = createFileRoute("/_shell/alerts")({
   head: pageHead("Alert inbox", "Prioritized safety events across your assigned rigs."),
@@ -34,6 +37,31 @@ const summary: { sev: Severity; count: string; note: string }[] = [
 
 function Alerts() {
   const { items, respond } = useAppState();
+  const cams = useRealCameras(useStreamSources(false, isNative()));
+  // Plain-language summaries (BitNet or template) stored on this device, by alert id.
+  const [plain, setPlain] = useState<Record<string, PlainSummary>>({});
+  const [busy, setBusy] = useState<string>("");
+  const refreshPlain = () =>
+    loadPlainSummaries()
+      .then((list) => setPlain(Object.fromEntries(list.map((s) => [s.alertId, s]))))
+      .catch(() => {});
+  useEffect(() => {
+    refreshPlain();
+    const timer = setInterval(refreshPlain, 5000); // automatic summaries arrive while this page is open
+    return () => clearInterval(timer);
+  }, []);
+  const summarise = async (a: (typeof items)[number]) => {
+    setBusy(a.id);
+    const place = [a.rig, a.area].filter(Boolean).join(" · ");
+    await describeAlert(
+      { id: a.id, severity: a.severity, condition: a.condition, place },
+      cams[0]?.id ?? "",
+      place,
+      () => {},
+    ).catch(() => {});
+    await refreshPlain();
+    setBusy("");
+  };
   const [tab, setTab] = useState("open");
   const [sev, setSev] = useState("All severities");
   const [rig, setRig] = useState("All rigs");
@@ -169,6 +197,12 @@ function Alerts() {
                 <td className={td}>
                   <div className="font-medium">{a.condition}</div>
                   <div className="text-xs text-muted-foreground">{a.area}</div>
+                  {plain[a.id] && (
+                    <div className="mt-1 max-w-md text-xs">
+                      {plain[a.id]!.text}{" "}
+                      <span className="text-muted-foreground">({plain[a.id]!.source === "slm" ? "BitNet" : "Template"})</span>
+                    </div>
+                  )}
                 </td>
                 <td className={td}>
                   <Mono>{a.age}</Mono>
@@ -190,6 +224,9 @@ function Alerts() {
                       <Link to="/events/$eventId" params={{ eventId: a.id }}>
                         <Btn>Review</Btn>
                       </Link>
+                    )}
+                    {isNative() && (
+                      <Btn onClick={() => summarise(a)}>{busy === a.id ? "Writing…" : "Plain words"}</Btn>
                     )}
                     {a.status !== "Acknowledged" && (
                       <Btn onClick={() => respond(a.id, "Acknowledged")}>Acknowledge</Btn>

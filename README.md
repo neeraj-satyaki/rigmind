@@ -10,6 +10,7 @@ shows everything in a desktop app. Licensed to Satyaki Solutions Private Limited
   the IDSS masks.
 * **Early warning** – the IDSS state machine: Yellow (monitoring), Orange (warning), Red (critical). One alert per episode, an audit
   row for every transition, coloured stacked toasts, a bell with timestamps, a tray notification and a tone for Orange and Red.
+* **Event cycles** – Yellow>Orange>Yellow is a normal cycle; Yellow>Orange>Red>Orange>Yellow and Yellow>Orange>Red>Yellow are critical cycles. Each closed cycle is one alert (Cleared) and gets a one or two line plain-language summary (BitNet, with a fixed action sentence if the model omits one) built from the scene: class names, positions, mask contours and centroid paths. Also on Red, PPE advisories and the Alerts page "Plain words" button.
 * **PPE compliance** – each person the IDSS model finds is checked for the required items (default helmet, vest, gloves); a missing
   item raises a quiet Advisory alert ("PPE not detected: vest"). ByteTrack removes box flicker and gives stable person ids.
 * **Evidence** – a Red alarm saves a clip set (pre-roll and the segment holding the Red moment) that plays in the Evidence library;
@@ -73,6 +74,6 @@ check, a performance validation harness and a visible install-to-uninstall test.
 * The test camera delivers about 3-6 frames per second in bursts; smoothness is limited by the source, and the inference gate
   trades frame rate for overlay accuracy.
 * Saved zones are stored but do not drive detection or alarms yet.
-* BitNet plain-language summaries are not included in the Windows installer; summaries use a template sentence grounded in the real fields.
+* BitNet plain-language summaries are optional at install: the installer asks, then downloads the 1.19 GB model (about 1.2 GB of memory while RigMind runs; 7-40 s per summary on the CPU). Without it, summaries use a template sentence.
 * The test footage reaches Yellow and Orange but not Red.
 * The visible install test driver's wizard clicking has not been proven end to end.

@@ -8,7 +8,7 @@ namespace rigmind {
 
 namespace {
 
-constexpr std::size_t kMaxChars = 220;
+constexpr std::size_t kMaxChars = 360;
 constexpr std::size_t kMinChars = 20;
 const std::vector<std::string> kLeakMarkers = {"event:", "sentence:", "answer:", "facts:", "write one", "rewrite", "##", "**"};
 
@@ -36,7 +36,7 @@ std::size_t code_points(const std::string& text) {
 
 } // namespace
 
-std::string first_sentence(const std::string& text) {
+std::string first_sentences(const std::string& text, int max_sentences) {
     // First non-empty line.
     std::string line;
     std::size_t start = 0;
@@ -64,14 +64,40 @@ std::string first_sentence(const std::string& text) {
     while (i < line.size() && std::isspace(static_cast<unsigned char>(line[i]))) ++i;
     const std::string head = line.substr(i);
 
-    // Cut after the first full stop, question or exclamation mark that ends a word.
+    // Cut after the max_sentences-th full stop, question or exclamation mark that ends a word.
+    int seen = 0;
     for (std::size_t k = 0; k < head.size(); ++k) {
         const char c = head[k];
         if ((c == '.' || c == '!' || c == '?') && (k + 1 == head.size() || std::isspace(static_cast<unsigned char>(head[k + 1])))) {
-            return head.substr(0, k + 1);
+            if (++seen >= max_sentences) return head.substr(0, k + 1);
         }
     }
     return head;
+}
+
+std::string first_sentence(const std::string& text) { return first_sentences(text, 1); }
+
+bool has_action(const std::string& sentence) {
+    static const std::vector<std::string> kCues = {"check", "stop", "confirm", "inspect", "review", "ensure", "verify", "must", "should",
+                                                   "please", "clear the", "evacuate", "call ", "report to", "acknowledge", "needs to", "need to",
+                                                   "make sure", "wear "};
+    const std::string text = lower(sentence);
+    for (const std::string& cue : kCues) {
+        if (text.find(cue) != std::string::npos) return true;
+    }
+    return false;
+}
+
+std::string with_action(const std::string& sentence, const std::string& severity, bool* added) {
+    if (added) *added = false;
+    if (sentence.empty() || has_action(sentence)) return sentence;
+    const char* action = severity == "Critical" ? "Stop the work and check the area now."
+                         : severity == "Warning" ? "Check the area and confirm the crew is clear."
+                                                 : "Confirm that everyone wears the required PPE.";
+    std::string out = trim(sentence);
+    if (out.back() != '.' && out.back() != '!' && out.back() != '?') out += '.';
+    if (added) *added = true;
+    return out + " " + action;
 }
 
 std::string reject_reason(const std::string& sentence, const nlohmann::json& event) {

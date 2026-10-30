@@ -110,6 +110,14 @@ nlohmann::json AlarmRecorder::handle(const nlohmann::json& event, std::int64_t n
     std::string place = clip_text(event.value("place", std::string()), 128);
     const std::int64_t frame = event.value("frame", static_cast<std::int64_t>(0));
 
+    // The pipeline sends the state only; give the row and the summaries words that match the EWS chain.
+    if (condition.empty() && *next != AlarmState::None) {
+        condition = *next == AlarmState::Yellow ? "Machine present with link tilt angled"
+                    : *next == AlarmState::Orange ? "Elevator near the platform"
+                                                  : "Elevator in the platform danger zone";
+    }
+    if (place.empty()) place = "Camera " + cam;
+
     std::lock_guard<std::mutex> lock(mutex_);
     Camera& c = cameras_[cam];
     const AlarmState from = c.state;
@@ -117,12 +125,58 @@ nlohmann::json AlarmRecorder::handle(const nlohmann::json& event, std::int64_t n
 
     if (!changed && c.episode == 0) return out; // None repeated before any episode: nothing to attach
 
+    nlohmann::json closed; // set when this line ends an event cycle
     if (changed) {
-        if (from == AlarmState::None) {
+        // Event cycle: Yellow -> Orange -> ... -> Yellow. Falling back to Yellow from Orange or Red ends the cycle (its alert
+        // row is Cleared with the peak it reached) and that Yellow is the baseline of the next cycle. Reaching None ends it too.
+        AlarmState recorded_from = from;
+        if (level_of(from) >= 1 && (*next == AlarmState::Yellow || *next == AlarmState::None)) {
+            c.path += *next == AlarmState::Yellow ? ">Y" : ">N";
+            const bool critical = c.peak >= 2;
+            closed = {{"alertId", c.alert_id}, {"peak", c.peak}, {"critical", critical},
+                      {"cycle", c.path}, {"kind", critical ? "critical" : "normal"}};
+            if (condition.empty()) condition = c.condition;
+            if (place.empty()) place = c.place;
+            if (audit_) {
+                audit_->record("backend", "alarm.cycle", c.alert_id,
+                               clip_text(std::string(critical ? "critical" : "normal") + " cycle " + c.path + " | " + condition +
+                                             " | " + place + " | " + cam,
+                                         512),
+                               now_ms);
+            }
+            if (*next == AlarmState::Yellow) {
+                try {
+                    EventStore::AlarmEpisodeRecord record;
+                    record.cam_id = cam;
+                    record.alert_id = c.alert_id;
+                    record.from = from;
+                    record.to = *next;
+                    record.severity = severity_of_level(c.peak);
+                    record.status = "Cleared";
+                    record.condition = condition;
+                    record.place = place;
+                    record.frame = frame;
+                    record.timestamp_ms = now_ms;
+                    store_.record_alarm_episode(record);
+                } catch (const std::exception& e) {
+                    std::cerr << "alarm record failed: " << e.what() << '\n';
+                }
+                if (audit_) {
+                    audit_->record("backend", "alarm.transition", c.alert_id,
+                                   clip_text(std::string(state_name(from)) + " -> Yellow | cycle closed | " + condition + " | " + place + " | " + cam, 512),
+                                   now_ms);
+                }
+                recorded_from = AlarmState::None; // the same Yellow opens the next cycle's row
+                c.state = AlarmState::None;
+            }
+        }
+        if (recorded_from == AlarmState::None) {
             ++c.episode;
             c.peak = -1;
+            c.path.clear();
             c.alert_id = make_alert_id(cam, c.episode);
         }
+        if (*next != AlarmState::None) c.path += (c.path.empty() ? "" : ">") + std::string(1, *next == AlarmState::Yellow ? 'Y' : *next == AlarmState::Orange ? 'O' : 'R');
         c.peak = std::max(c.peak, level_of(*next));
         if (!condition.empty()) c.condition = condition;
         if (!place.empty()) c.place = place;
@@ -136,7 +190,7 @@ nlohmann::json AlarmRecorder::handle(const nlohmann::json& event, std::int64_t n
             EventStore::AlarmEpisodeRecord record;
             record.cam_id = cam;
             record.alert_id = c.alert_id;
-            record.from = from;
+            record.from = recorded_from;
             record.to = *next;
             record.severity = severity;
             record.status = status;
@@ -150,7 +204,7 @@ nlohmann::json AlarmRecorder::handle(const nlohmann::json& event, std::int64_t n
         }
         if (audit_) {
             audit_->record("backend", "alarm.transition", c.alert_id,
-                           clip_text(std::string(state_name(from)) + " -> " + state_name(*next) + " | " + shown_condition +
+                           clip_text(std::string(state_name(recorded_from)) + " -> " + state_name(*next) + " | " + shown_condition +
                                          " | " + shown_place + " | " + cam,
                                      512),
                            now_ms);
@@ -163,6 +217,7 @@ nlohmann::json AlarmRecorder::handle(const nlohmann::json& event, std::int64_t n
     out["escalation"] = std::max(0, level_of(c.state));
     out["peak"] = c.peak;
     out["changed"] = changed;
+    if (closed.is_object()) out["closed"] = closed;
     return out;
 }
 

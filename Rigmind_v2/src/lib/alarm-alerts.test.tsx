@@ -171,3 +171,59 @@ describe("alarm episode -> alert bridge", () => {
     expect(rows()).toHaveLength(0);
   });
 });
+describe("event cycles (host closed field)", () => {
+  let stop: () => void;
+  beforeEach(() => {
+    vi.useFakeTimers();
+    h.listeners.clear();
+    h.calls.length = h.toasts.length = h.tones.length = h.os.length = 0;
+    h.native = true;
+    resetAlarmAlerts();
+    stop = startAlarmAlerts();
+  });
+  afterEach(() => {
+    stop();
+    vi.useRealTimers();
+  });
+
+  const line = (state: string, alertId: string, closed?: object) =>
+    h.listeners.forEach((l) =>
+      l({ ev: "alarm", cam: "CAM-01", state, condition: "Elevator near platform", place: "Demo rig 01 · Derrick board", alertId, phase: "Monitoring", escalation: 0, closed }),
+    );
+  const run = async (fn: () => void) => {
+    await act(async () => {
+      fn();
+      await vi.advanceTimersByTimeAsync(LOGO_ALERT_MS + 50);
+    });
+  };
+  const describes = () => h.calls.filter((c) => c.method === "event.describe").map((c) => c.params);
+
+  it("Yellow>Orange>Yellow closes a normal cycle and summarises it; the new Yellow is quiet", async () => {
+    await run(() => line("Yellow", "ALM-CAM-01-a1"));
+    await run(() => line("Orange", "ALM-CAM-01-a1"));
+    expect(describes()).toHaveLength(0);
+    await run(() => line("Yellow", "ALM-CAM-01-a2", { alertId: "ALM-CAM-01-a1", peak: 1, critical: false, cycle: "Y>O>Y", kind: "normal" }));
+    expect(describes()).toHaveLength(1);
+    expect(describes()[0]).toMatchObject({ alertId: "ALM-CAM-01-a1", severity: "Warning" });
+    expect(describes()[0].condition).toContain("Normal event cycle (Yellow, Orange, Yellow)");
+    await run(() => line("Yellow", "ALM-CAM-01-a2")); // repeat
+    expect(describes()).toHaveLength(1);
+  });
+
+  it("Yellow>Orange>Red>Orange>Yellow closes a critical cycle; Red still describes at once", async () => {
+    await run(() => line("Orange", "ALM-CAM-01-b1"));
+    await run(() => line("Red", "ALM-CAM-01-b1"));
+    expect(describes()).toHaveLength(1); // at the Red moment
+    await run(() => line("Orange", "ALM-CAM-01-b1"));
+    await run(() => line("Yellow", "ALM-CAM-01-b2", { alertId: "ALM-CAM-01-b1", peak: 2, critical: true, cycle: "Y>O>R>O>Y", kind: "critical" }));
+    expect(describes()).toHaveLength(2);
+    expect(describes()[1]).toMatchObject({ alertId: "ALM-CAM-01-b1", severity: "Critical" });
+    expect(describes()[1].condition).toContain("Critical event cycle (Yellow, Orange, Red, Orange, Yellow)");
+  });
+
+  it("a Yellow-only stretch is cleared without a summary", async () => {
+    await run(() => line("Yellow", "ALM-CAM-01-c1"));
+    await run(() => line("None", "ALM-CAM-01-c1", { alertId: "ALM-CAM-01-c1", peak: 0, critical: false, cycle: "Y>N", kind: "normal" }));
+    expect(describes()).toHaveLength(0);
+  });
+});

@@ -11,6 +11,9 @@ const LEVEL: Record<Live, number> = { Yellow: 0, Orange: 1, Red: 2 };
 
 /*
  * Episode model: one alert per episode, escalating in place.
+ * Event cycle: Yellow>Orange>Yellow is a normal cycle; Yellow>Orange>Red>Orange>Yellow and Yellow>Orange>Red>Yellow are critical
+ * cycles. Falling back to Yellow ends the cycle (the host sends closed:{alertId,peak,critical,cycle}); that Yellow opens the next
+ * item. A closed cycle is marked Cleared and gets a plain-language summary of the whole cycle.
  *   Yellow = "monitoring" (quiet: no toast, no bell, no tone; the item sits in the inbox as Monitoring)
  *   Orange = Warning, Escalated: toast + bell entry
  *   Red    = Critical, Escalated: toast + bell entry + red tone + OS notification + plain-language description
@@ -47,6 +50,38 @@ function osNotify(a: RaisedAlert) {
 
 const str = (v: unknown) => (typeof v === "string" ? v : "");
 
+/** "Y>O>R>O>Y" -> "Yellow, Orange, Red, Orange, Yellow" */
+const CYCLE_NAME: Record<string, string> = { Y: "Yellow", O: "Orange", R: "Red", N: "clear" };
+export const cycleWords = (path: string) => path.split(">").map((p) => CYCLE_NAME[p] ?? p).join(", ");
+
+/** Marks a finished event cycle Cleared and asks for its summary. Runs once per alert id. */
+function closeCycle(cam: string, closed: Record<string, unknown>, place: string, condition: string) {
+  const id = str(closed["alertId"]);
+  if (!id || cleared.has(id)) return;
+  cleared.add(id);
+  const peak = typeof closed["peak"] === "number" ? (closed["peak"] as number) : 0;
+  const critical = closed["critical"] === true;
+  const severity = ALARM_SEVERITY[levelName(peak)];
+  updateAlert({ id, severity, condition, place, phase: "Cleared" });
+  if (peak < 1) return; // a Yellow-only stretch is not an event cycle
+  const cycle = str(closed["cycle"]);
+  const alert: RaisedAlert = {
+    id,
+    severity,
+    condition: `${critical ? "Critical" : "Normal"} event cycle (${cycleWords(cycle)}): ${condition}`.slice(0, 128),
+    place,
+    phase: "Cleared",
+  };
+  const colors = alertColors(severity);
+  describeAlert(alert, cam, place, (text) =>
+    toast(`${id} cycle summary`, {
+      description: text,
+      style: { background: colors.background, color: colors.color, border: `1px solid ${colors.borderColor}` },
+      descriptionClassName: "!text-inherit opacity-90",
+    }),
+  ).catch(() => {});
+}
+
 /**
  * Applies one host alarm event to the episode of its camera. Returns the alert when this event presented it
  * (Orange or Red reached for the first time in the episode); Yellow, repeats and the return to None return nothing.
@@ -62,6 +97,12 @@ export function handleAlarmEvent(msg: NativeEvent): RaisedAlert | undefined {
   const id = hostId || localId;
   const place = str(msg["place"]).slice(0, 128);
   const condition = (str(msg["condition"]) || "Safety condition detected").slice(0, 128);
+
+  const closed = msg["closed"];
+  if (closed && typeof closed === "object") {
+    ep.n++; // the next non-None state starts a new item (local ids)
+    closeCycle(msg.cam, closed as Record<string, unknown>, place, condition);
+  }
 
   if (state === "None") {
     const wasOpen = ep.last !== "None" || hostId !== ""; // a host id means the host knows an episode

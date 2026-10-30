@@ -908,6 +908,7 @@ void Inference::run(Worker& worker) {
         }
 
         json items = json::array();
+        std::vector<SceneObs> scene_obs;
         DrawResult draw;
         draw.model = worker.model;
         draw.key = frame->pts_key;
@@ -945,8 +946,23 @@ void Inference::run(Worker& worker) {
                 item["track_id"] = d.track_id;
                 if (d.held) item["held"] = true;
             }
-            if (draw_it) draw.items.push_back(std::move(draw_item));
+            if (draw_it) {
+                SceneObs obs;
+                obs.label = draw_item.label;
+                obs.track_id = worker.model == "ppe" && track_cfg.enabled ? d.track_id : 0;
+                for (int k = 0; k < 4; ++k) obs.box[k] = static_cast<float>(draw_item.box[k]);
+                for (const DrawPoint& p : draw_item.polygon) obs.contour.emplace_back(p.x, p.y);
+                scene_obs.push_back(std::move(obs));
+                draw.items.push_back(std::move(draw_item));
+            }
             items.push_back(item);
+        }
+        // Scene memory for the plain-language summaries: positions, mask outlines and centroid paths of every class.
+        scene_.update(worker.model, frame->ts_ms, scene_obs);
+        {
+            std::int64_t due = scene_emit_ms_.load();
+            if (frame->ts_ms - due >= 1000 && scene_emit_ms_.compare_exchange_strong(due, frame->ts_ms))
+                emit_(scene_.snapshot(frame->cam, frame->ts_ms, frame->width, frame->height));
         }
         json event = {{"ev", "detections"}, {"cam", frame->cam}, {"model", worker.model}, {"ts", frame->ts_ms},
                       {"pts_ms", frame->pts_ms}, {"rtp", frame->rtp}, {"latency_ms", wall_ms() - frame->ts_ms}, {"w", frame->width}, {"h", frame->height}, {"ms", std::round(elapsed_us / 100.0) / 10.0}, {"items", items}};

@@ -344,6 +344,18 @@ static void test_slm_guard() {
     CHECK(rigmind::first_sentence(": At 28 Oct, camera CAM-05 recorded: Tilt.") == "At 28 Oct, camera CAM-05 recorded: Tilt.");
     CHECK(rigmind::first_sentence("28 Oct 2026 21:28 is the date.") == "28 Oct 2026 21:28 is the date.");
     CHECK(rigmind::first_sentence("") == "");
+    {
+        bool added = false;
+        CHECK(rigmind::with_action("Camera CAM-01 at Rig 1 recorded a collision.", "Critical", &added) ==
+                  "Camera CAM-01 at Rig 1 recorded a collision. Stop the work and check the area now." && added);
+        CHECK(rigmind::with_action("Camera CAM-01 recorded an elevator near the platform", "Warning", &added) ==
+                  "Camera CAM-01 recorded an elevator near the platform. Check the area and confirm the crew is clear." && added);
+        CHECK(rigmind::with_action("Camera CAM-01 saw no vest.", "Advisory", &added).find("required PPE") != std::string::npos && added);
+        CHECK(rigmind::with_action("Camera CAM-01 saw a collision; stop the work and check the area.", "Critical", &added) ==
+                  "Camera CAM-01 saw a collision; stop the work and check the area." && !added);
+        CHECK(rigmind::with_action("", "Critical", &added).empty() && !added);
+        CHECK(rigmind::first_sentences("One thing happened. Check the area. Third one.", 2) == "One thing happened. Check the area.");
+    }
 
     const nlohmann::json event = {{"camId", "CAM-03"}, {"place", "Demo rig 02 \xC2\xB7 Drill floor"}};
     CHECK(rigmind::reject_reason("At 28 Oct, camera cam-03 at Demo rig 02 recorded a fault.", event).empty());
@@ -469,6 +481,62 @@ static void test_alarm_episode_recorder() {
     std::filesystem::remove_all(dir);
 }
 
+static void test_event_cycles() {
+    const auto dir = std::filesystem::temp_directory_path() / "rigmind-cycle-test";
+    std::filesystem::remove_all(dir);
+    std::filesystem::create_directories(dir);
+    const std::string db = (dir / "rigmind.db").string();
+    {
+        rigmind::EventStore store(db);
+        rigmind::AuditLog audit(db);
+        rigmind::AlarmRecorder rec(store, &audit, "c1");
+        std::int64_t t = 1000;
+        auto step = [&](const char* state) { return rec.handle(alarm_line("CAM-01", state, "Elevator near platform", "Drill floor"), t += 100); };
+
+        // Yellow > Orange > Yellow: one normal cycle; that Yellow opens the next row.
+        auto e = step("Yellow");
+        const std::string first = e["alertId"];
+        CHECK(!e.contains("closed"));
+        e = step("Orange");
+        CHECK(e["alertId"] == first && e["phase"] == "Escalated");
+        e = step("Yellow");
+        CHECK(e.contains("closed") && e["closed"]["alertId"] == first && e["closed"]["kind"] == "normal" && e["closed"]["critical"] == false);
+        CHECK(e["closed"]["cycle"] == "Y>O>Y" && e["closed"]["peak"] == 1);
+        const std::string second = e["alertId"];
+        CHECK(second != first && e["phase"] == "Monitoring" && e["episode"] == 2);
+
+        // Yellow > Orange > Red > Orange > Yellow: one critical cycle.
+        step("Orange");
+        step("Red");
+        e = step("Orange");
+        CHECK(e["alertId"] == second && !e.contains("closed"));
+        e = step("Yellow");
+        CHECK(e["closed"]["alertId"] == second && e["closed"]["kind"] == "critical" && e["closed"]["cycle"] == "Y>O>R>O>Y" && e["closed"]["peak"] == 2);
+        const std::string third = e["alertId"];
+
+        // Yellow > Orange > Red > Yellow: also critical.
+        step("Orange");
+        step("Red");
+        e = step("Yellow");
+        CHECK(e["closed"]["alertId"] == third && e["closed"]["critical"] == true && e["closed"]["cycle"] == "Y>O>R>Y");
+        const std::string fourth = e["alertId"];
+
+        // A Yellow-only stretch ending in None is not an event cycle (peak 0) but is still cleared.
+        e = step("None");
+        CHECK(e["alertId"] == fourth && e["phase"] == "Cleared");
+
+        // Rows: closed cycles are Cleared with their peak severity; the first is Warning, the second Critical.
+        std::string status1, sev1, sev2;
+        for (const auto& row : store.list_raised_alerts(50)) {
+            if (row["id"] == first) { status1 = row["status"]; sev1 = row["severity"]; }
+            if (row["id"] == second) sev2 = row["severity"];
+        }
+        CHECK(status1 == "Cleared" && sev1 == "Warning" && sev2 == "Critical");
+    }
+    CHECK(count_audit_lines(dir / "audit.log", "alarm.cycle") == 3);
+    std::filesystem::remove_all(dir);
+}
+
 static nlohmann::json ppe_line(const char* cam, const char* state, std::vector<std::string> missing, int persons = 1) {
     return {{"ev", "ppe"}, {"cam", cam}, {"state", state}, {"missing", missing}, {"persons", persons}, {"since_ms", 1}};
 }
@@ -573,6 +641,7 @@ static void test_alarm_events_migration() {
 }
 int main() {
     test_alarm_episode_recorder();
+    test_event_cycles();
     test_ppe_episode_recorder();
     test_alarm_events_migration();
     test_slm_guard();

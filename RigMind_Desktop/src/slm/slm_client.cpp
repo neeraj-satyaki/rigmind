@@ -11,7 +11,7 @@ namespace {
 
 // Same system message as scripts/host.py: one sentence and nothing else.
 const char* kSystemMessage =
-    "You write short plain-language safety summaries for rig supervisors. Reply with exactly one sentence and nothing else.";
+    "You write short plain-language safety summaries for rig supervisors. Reply with one or two short sentences and nothing else.";
 
 std::string post_json(unsigned short port, const std::string& body) {
     HINTERNET session = WinHttpOpen(L"RigMind", WINHTTP_ACCESS_TYPE_NO_PROXY, WINHTTP_NO_PROXY_NAME,
@@ -47,23 +47,26 @@ std::string post_json(unsigned short port, const std::string& body) {
 
 // Worker: asks the model, applies the sentence rules, and sends the description event. Takes copies only.
 void ask_model(unsigned short port, SlmClient::OnLine on_line, nlohmann::json command) {
-    std::string text;
+    std::string text, reason;
+    bool action_added = false;
     try {
         const nlohmann::json body = {
             {"messages", {{{"role", "system"}, {"content", kSystemMessage}},
                           {{"role", "user"}, {"content", command.value("prompt", std::string())}}}},
-            {"max_tokens", 80},
+            {"max_tokens", 110},
             {"temperature", 0},
         };
         const nlohmann::json reply = nlohmann::json::parse(post_json(port, body.dump()));
-        const std::string sentence = rigmind::first_sentence(reply.at("choices").at(0).at("message").at("content").get<std::string>());
-        if (rigmind::reject_reason(sentence, command).empty()) text = sentence;
+        const std::string sentence = rigmind::first_sentences(reply.at("choices").at(0).at("message").at("content").get<std::string>(), 2);
+        reason = rigmind::reject_reason(sentence, command);
+        if (reason.empty()) text = rigmind::with_action(sentence, command.value("severity", std::string()), &action_added);
     } catch (const std::exception&) {
+        reason = "model unavailable";
         text.clear(); // model down or answer unusable: the template text stands
     }
     on_line(nlohmann::json{{"ev", "description"}, {"alertId", command.value("alertId", std::string())},
                            {"text", text.empty() ? nlohmann::json(nullptr) : nlohmann::json(text)},
-                           {"source", text.empty() ? "template" : "slm"}}
+                           {"source", text.empty() ? "template" : "slm"}, {"reason", reason}, {"action_added", action_added}}
                 .dump());
 }
 
@@ -72,7 +75,7 @@ void ask_model(unsigned short port, SlmClient::OnLine on_line, nlohmann::json co
 SlmClient::SlmClient(const std::wstring& server_exe, const std::wstring& model, unsigned short port, OnLine on_line)
     : port_(port), on_line_(std::move(on_line)) {
     const std::wstring folder = server_exe.substr(0, server_exe.find_last_of(L"\\/"));
-    std::wstring cmdline = L"\"" + server_exe + L"\" -m \"" + model + L"\" --port " + std::to_wstring(port) + L" -c 512 -t 2";
+    std::wstring cmdline = L"\"" + server_exe + L"\" -m \"" + model + L"\" --port " + std::to_wstring(port) + L" -c 2560 -t 4";
     STARTUPINFOW si{};
     si.cb = sizeof(si);
     PROCESS_INFORMATION pi{};

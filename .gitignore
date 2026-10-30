@@ -39,3 +39,7 @@ RigMind_Desktop/tests/validation/*.jsonl
 RigMind_Desktop/tests/cases/test_cases.csv
 RigMind_Desktop/gpu-pack/install-gpu.cmd
 RigMind_Desktop/tests/e2e/inspect-out.json
+
+# BitNet build tree and model (built/downloaded locally; the installer fetches the model)
+RigMind_Desktop/third_party/bitnet.cpp/
+RigMind_Desktop/third_party/bitnet-model/

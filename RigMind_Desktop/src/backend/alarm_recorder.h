@@ -16,7 +16,9 @@ namespace rigmind {
 // The host is the authority for alarm history. Every {"ev":"alarm"} line from the pipeline goes through
 // handle() before it is forwarded to the page, whether or not the page is open.
 //
-// Episode model: an episode runs from the first non-None state of a camera until that camera returns to None.
+// Episode model = one event cycle: it runs from the first non-None state of a camera and ends when the camera returns to None
+// or falls back to Yellow after Orange or Red (Y>O>Y is a normal cycle; Y>O>R>O>Y and Y>O>R>Y are critical cycles). That Yellow
+// opens the next cycle's row. A line that ends a cycle also carries closed:{alertId, peak, critical, cycle, kind}.
 // One alerts row represents the whole episode and changes in place:
 //   Yellow -> Advisory, Monitoring   (quiet: the app is only watching)
 //   Orange -> Warning,  Escalated
@@ -49,6 +51,7 @@ private:
         AlarmState state = AlarmState::None;
         int episode = 0;
         int peak = -1;            // -1 none, 0 Yellow, 1 Orange, 2 Red
+        std::string path;         // states of the open cycle, e.g. "Y>O>R>O"
         std::string alert_id;
         std::string condition;
         std::string place;

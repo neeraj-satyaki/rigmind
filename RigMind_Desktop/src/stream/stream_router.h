@@ -1,11 +1,17 @@
 #pragma once
 
+#include <chrono>
+#include <cstdint>
+#include <cstdlib>
 #include <functional>
+#include <map>
+#include <mutex>
 #include <string>
 
 #include <nlohmann/json.hpp>
 
 #include "backend/bridge.h"
+#include "slm/scene_text.h"
 #include "slm/slm_client.h"
 #include "stream/pipeline_process.h"
 
@@ -17,10 +23,29 @@ public:
     StreamRouter(PipelineProcess* pipeline, SlmClient* slm, OnLine on_line)
         : pipeline_(pipeline), slm_(slm), on_line_(std::move(on_line)) {}
 
+    // Latest "scene" event per camera (objects, mask outlines, centroid paths); kept for the summary prompt only.
+    void note_scene(const nlohmann::json& scene) {
+        std::lock_guard<std::mutex> lock(scene_mutex_);
+        scenes_[scene.value("cam", std::string())] = scene;
+    }
+
     void send(const nlohmann::json& command) override {
         if (command.value("cmd", std::string()) == "describe") {
             if (slm_) {
-                slm_->describe(command);
+                nlohmann::json with_scene = command;
+                nlohmann::json scene;
+                {
+                    std::lock_guard<std::mutex> lock(scene_mutex_);
+                    const auto it = scenes_.find(command.value("camId", std::string()));
+                    if (it != scenes_.end()) scene = it->second;
+                    else if (scenes_.size() == 1) scene = scenes_.begin()->second; // single camera: the id may be unset
+                }
+                // Only a scene from the last 15 s is used: older data would describe something that has gone.
+                if (scene.is_object() && std::llabs(now_unix_ms() - scene.value("ts", std::int64_t{0})) < 15000) {
+                    const std::string text = rigmind::scene_prompt_text(scene);
+                    if (!text.empty()) with_scene["prompt"] = command.value("prompt", std::string()) + "\n" + text;
+                }
+                slm_->describe(with_scene);
             } else {
                 on_line_(nlohmann::json{{"ev", "description"}, {"alertId", command.value("alertId", std::string())},
                                         {"text", nullptr}, {"source", "template"}}.dump());
@@ -39,6 +64,11 @@ public:
     bool can_describe() const override { return slm_ != nullptr && slm_->running(); }
 
 private:
+    static std::int64_t now_unix_ms() {
+        return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count();
+    }
+    std::mutex scene_mutex_;
+    std::map<std::string, nlohmann::json> scenes_;
     PipelineProcess* pipeline_;
     SlmClient* slm_;
     OnLine on_line_;

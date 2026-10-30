@@ -108,6 +108,12 @@ target_include_directories(tracking_test PRIVATE ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(tracking_test PRIVATE rigmind_backend)
 add_test(NAME tracking COMMAND tracking_test)
 
+# Scene memory for the summary prompt (centroid paths, mask outlines, class names).
+add_executable(scene_test tests/scene_test.cpp)
+target_include_directories(scene_test PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(scene_test PRIVATE rigmind_backend)
+add_test(NAME scene COMMAND scene_test)
+
 if(WIN32)
     set(WEBVIEW2_DIR ${CMAKE_SOURCE_DIR}/third_party/webview2/build/native)
 
@@ -271,6 +277,87 @@ if(WIN32)
         string(REPLACE "@Q@" [=[$\\\"]=] _gpu_all "${_gpu_all}")
         string(APPEND CPACK_NSIS_EXTRA_INSTALL_COMMANDS "\n${_gpu_all}\n")
         string(APPEND CPACK_NSIS_EXTRA_UNINSTALL_COMMANDS "\n" [=[RMDir /r `$INSTDIR\\gpu`]=])
+    endif()
+
+    # BitNet plain-language summaries: the 2B model (1.19 GB) is downloaded at install time in two parts (like the GPU runtime),
+    # SHA-256 checked, joined into <install>\slm\ggml-model-i2_s.gguf. Asked once (default Yes, silent installs download).
+    # Without the model the app still runs: summaries use the template sentence. Each pack is "url|sha256".
+    set(RIGMIND_SLM_PACKS "" CACHE STRING "Semicolon-separated BitNet model parts the installer downloads: url|sha256")
+    if(RIGMIND_SLM_PACKS)
+        set(_slm_all "")
+        list(LENGTH RIGMIND_SLM_PACKS _slm_n)
+        set(_slm_i 0)
+        foreach(_pack IN LISTS RIGMIND_SLM_PACKS)
+            math(EXPR _slm_i "${_slm_i} + 1")
+            string(REPLACE "|" ";" _f "${_pack}")
+            list(GET _f 0 _url)
+            list(GET _f 1 _sha)
+            set(_slm_nsis [=[
+      ; ---- BitNet model, part @I@ of @N@: download, verify, unpack into $INSTDIR\slm (no double quotes in this block)
+      IfFileExists `$INSTDIR\slm\ggml-model-i2_s.gguf` rm_slm_done_@I@ 0
+      StrCmp $R8 `0` rm_slm_done_@I@ 0
+      DetailPrint `Downloading the BitNet summary model, part @I@ of @N@. This can take several minutes...`
+      nsExec::ExecToLog `$SYSDIR\curl.exe -sS -L --fail --retry 5 --retry-delay 5 --connect-timeout 30 --speed-time 60 --speed-limit 10240 -C - -o @Q@$INSTDIR\slm-part@I@.zip@Q@ @Q@@SLM_URL@@Q@`
+      Pop $0
+      StrCmp $0 `0` rm_slm_verify_@I@ rm_slm_fail_@I@
+      rm_slm_verify_@I@:
+      DetailPrint `Verifying part @I@ of @N@...`
+      nsExec::ExecToLog `$SYSDIR\cmd.exe /c @Q@@Q@$SYSDIR\certutil.exe@Q@ -hashfile @Q@$INSTDIR\slm-part@I@.zip@Q@ SHA256 | @Q@$SYSDIRindstr.exe@Q@ /i /c:@SLM_SHA@@Q@`
+      Pop $0
+      StrCmp $0 `0` rm_slm_unpack_@I@ rm_slm_fail_@I@
+      rm_slm_unpack_@I@:
+      DetailPrint `Installing part @I@ of @N@...`
+      nsExec::ExecToLog `$SYSDIR	ar.exe -xf @Q@$INSTDIR\slm-part@I@.zip@Q@ -C @Q@$INSTDIR@Q@`
+      Pop $0
+      Delete `$INSTDIR\slm-part@I@.zip`
+      StrCmp $0 `0` rm_slm_done_@I@ rm_slm_fail_@I@
+      rm_slm_fail_@I@:
+      Delete `$INSTDIR\slm-part@I@.zip`
+      StrCpy $R8 `0`
+      DetailPrint `Part @I@ of the BitNet model could not be downloaded or failed its check.`
+      IfSilent rm_slm_done_@I@ 0
+      MessageBox MB_OK|MB_ICONEXCLAMATION `The BitNet summary model could not be downloaded (no internet, blocked, or failed its integrity check).$$
+RigMind works without it and shows the standard sentence. Run this installer again with internet access to add it.`
+      rm_slm_done_@I@:
+]=])
+            string(REPLACE "@I@" "${_slm_i}" _slm_nsis "${_slm_nsis}")
+            string(REPLACE "@N@" "${_slm_n}" _slm_nsis "${_slm_nsis}")
+            string(REPLACE "@SLM_URL@" "${_url}" _slm_nsis "${_slm_nsis}")
+            string(REPLACE "@SLM_SHA@" "${_sha}" _slm_nsis "${_slm_nsis}")
+            string(APPEND _slm_all "${_slm_nsis}")
+        endforeach()
+        set(_slm_head [=[
+      ; ---- BitNet option
+      StrCpy $R8 `1`
+      IfFileExists `$INSTDIR\slm\ggml-model-i2_s.gguf` rm_slm_asked 0
+      IfSilent rm_slm_asked 0
+      MessageBox MB_YESNO|MB_ICONQUESTION `Add plain-language alert summaries (BitNet)?$$
+$$
+Yes: downloads a 1.2 GB model now. Summaries are written on this PC; it uses about 1.2 GB of memory while RigMind runs.$$
+No: alerts show the standard sentence. You can run this installer again later to add it.` IDYES rm_slm_asked
+      StrCpy $R8 `0`
+      rm_slm_asked:
+]=])
+        set(_slm_tail [=[
+      ; join the parts
+      IfFileExists `$INSTDIR\slm\ggml-model-i2_s.gguf` rm_slm_joined 0
+      IfFileExists `$INSTDIR\slm\ggml-model-i2_s.gguf.part1` 0 rm_slm_joined
+      IfFileExists `$INSTDIR\slm\ggml-model-i2_s.gguf.part2` 0 rm_slm_joined
+      DetailPrint `Joining the BitNet model...`
+      nsExec::ExecToLog `$SYSDIR\cmd.exe /c copy /b @Q@$INSTDIR\slm\ggml-model-i2_s.gguf.part1@Q@+@Q@$INSTDIR\slm\ggml-model-i2_s.gguf.part2@Q@ @Q@$INSTDIR\slm\ggml-model-i2_s.gguf@Q@`
+      Pop $0
+      rm_slm_joined:
+      Delete `$INSTDIR\slm\ggml-model-i2_s.gguf.part1`
+      Delete `$INSTDIR\slm\ggml-model-i2_s.gguf.part2`
+]=])
+        set(_slm_all "${_slm_head}${_slm_all}${_slm_tail}")
+        string(REPLACE "\\" "\\\\" _slm_all "${_slm_all}")
+        string(REPLACE "@Q@" [=[$\\\"]=] _slm_all "${_slm_all}")
+        string(APPEND CPACK_NSIS_EXTRA_INSTALL_COMMANDS "
+${_slm_all}
+")
+        string(APPEND CPACK_NSIS_EXTRA_UNINSTALL_COMMANDS "
+" [=[RMDir /r `$INSTDIR\\slm`]=])
     endif()
 
     set(CPACK_NSIS_CREATE_ICONS_EXTRA "CreateShortCut '$SMPROGRAMS\\\\RigMind.lnk' '$INSTDIR\\\\RigMind.exe'\n    CreateShortCut '$DESKTOP\\\\RigMind.lnk' '$INSTDIR\\\\RigMind.exe'")
