@@ -69,3 +69,15 @@ python -u visible_e2e.py --no-install --no-uninstall --app-dir "C:\Program Files
 4. Reports: Download PDF saves to `Documents\RigMind Reports`; Download CSV opens cleanly in Excel.
 5. Start RigMind a second time: the first window comes forward and no second copy opens.
 6. Administration / Cameras: use the password eye, Ignore and Validate, then save.
+
+## One-file triggers: `RigMind_Desktop/scripts/rigmind.ps1`
+
+Everything is visible; nothing runs hidden unless you pass `-Silent`.
+
+| Command | What it does |
+|---|---|
+| `.\rigmind.ps1 install [-Installer path] [-Demo yes\|no] [-Bitnet yes\|no] [-Silent]` | Drives the installer wizard, then checks files, GPU runtime, BitNet model, shortcuts, uninstall entry (asks for UAC once). |
+| `.\rigmind.ps1 uninstall [-ClearData -Yes]` | Drives the uninstaller and checks nothing is left; `-ClearData` also removes `%LOCALAPPDATA%\RigMind`. Reports in Documents are never touched. |
+| `.\rigmind.ps1 test [-Suite unit,cases,ui,e2e,load,all] [-Build]` | Runs the chosen suites and writes `tests/run-results/run-<time>.md`. `e2e` needs a normal (non-admin) window and an installed app. |
+| `.\rigmind.ps1 cycle [-KeepInstalled]` | Uninstall old, install, app test, uninstall. |
+| `.\rigmind.ps1 hooks [-Remove]` | Git pre-push hook running unit, cases and ui. |

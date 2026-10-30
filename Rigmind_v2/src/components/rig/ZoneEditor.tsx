@@ -219,7 +219,7 @@ export function ZoneEditor() {
                 />
               ))}
             </svg>
-            <div className="absolute left-3 top-3 flex gap-1 rounded-md bg-slate p-1">
+            <div className="absolute left-3 top-3 z-30 flex gap-1 rounded-md bg-slate p-1">
               {[
                 { id: "select", Icon: MousePointer2, title: "Select vertex" },
                 { id: "add", Icon: Plus, title: "Add point" },
@@ -247,7 +247,7 @@ export function ZoneEditor() {
                 </Btn>
               ))}
             </div>
-            <span className="absolute bottom-3 left-3 rounded-sm bg-slate px-2 py-1 text-[11px] text-slate-foreground">
+            <span className="pointer-events-none absolute bottom-3 left-3 z-30 rounded-sm bg-slate px-2 py-1 text-[11px] text-slate-foreground">
               {mode === "add"
                 ? "Click to add points; choose Select vertex when done"
                 : "Select a point to adjust the boundary"}

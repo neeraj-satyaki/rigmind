@@ -861,7 +861,10 @@ def phase3_login(ctx, a) -> None:
     pg.evaluate("history.pushState(null, '', '/fleet'); window.dispatchEvent(new PopStateEvent('popstate'))")
     pause(1.5)
     R.add(ph, "workspace pages need the sign-in", pg.locator("aside").count() == 0 or "/login" in ui.path(), f"path={ui.path()}")
-    pg.goto("https://rigmind.app/login")
+    # Never pg.goto(): the app serves files only, a route typed as a URL has no file behind it (and F5 is disabled in the app).
+    if "/login" not in ui.path():
+        pg.evaluate("history.pushState(null, '', '/login'); window.dispatchEvent(new PopStateEvent('popstate'))")
+        pause(1.5)
     pg.get_by_label("Username").first.fill(E2E_USER)
     pg.get_by_label("Password", exact=True).first.fill(E2E_PASS)
     ui.click(pg.get_by_role("button", name="Sign in to workspace").first, wait=1)
@@ -994,7 +997,7 @@ def check_page(ui: UI, ph: str, label: str, path: str, demo: bool, store: dict) 
 # --------------------------------------------------------------------------------------------- CTA sweep (phase 5)
 
 CTA_SELECTOR = "button, a[href], [role=button], [role=tab], [role=switch], [role=menuitem], [role=checkbox], [role=combobox], [role=radio], select, input, textarea, summary"
-DESTRUCTIVE_RE = re.compile(r"log ?out|sign ?out|delete|remove|discard|reset|clear|revoke", re.I)
+DESTRUCTIVE_RE = re.compile(r"log ?out|sign ?out|delete|remove|discard|reset|clear|revoke|ask about evidence", re.I)
 # Controls that legitimately have no visible effect on their own (key regex -> reason).
 ALLOW_DEAD: list[tuple[re.Pattern, str]] = [(re.compile(r'^button\|Safety rules#1$'), 'first tab is already the active tab; clicking it changes nothing')]
 COVERAGE: list[dict] = []
