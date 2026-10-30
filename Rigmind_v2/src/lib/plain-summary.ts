@@ -63,6 +63,8 @@ export async function describeAlert(
   place: string,
   show: (text: string, source: "slm" | "template") => void,
   waitMs = SLM_WAIT_MS,
+  /** When the alert happened, for the scene shown to the model; 0 = no scene (an old alert). Default: now. */
+  sceneAtMs: number = Date.now(),
 ) {
   let early: NativeEvent | undefined;
   let deliver: ((msg: NativeEvent) => void) | undefined;
@@ -79,6 +81,7 @@ export async function describeAlert(
       place,
       camId,
       tsMs: Date.now(),
+      sceneTs: sceneAtMs,
     });
     const finish = (msg: Record<string, unknown>) => {
       off();

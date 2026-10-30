@@ -53,12 +53,11 @@ function Alerts() {
   const summarise = async (a: (typeof items)[number]) => {
     setBusy(a.id);
     const place = [a.rig, a.area].filter(Boolean).join(" · ");
-    await describeAlert(
-      { id: a.id, severity: a.severity, condition: a.condition, place },
-      cams[0]?.id ?? "",
-      place,
-      () => {},
-    ).catch(() => {});
+    // The alert's own camera (host alert ids are ALM-<camera>-... / PPE-<camera>-...); unknown = no camera, no scene.
+    const cam = cams.find((c) => a.id.startsWith(`ALM-${c.id}-`) || a.id.startsWith(`PPE-${c.id}-`))?.id ?? "";
+    // The scene is the camera's current view: only meaningful while the alert is still live.
+    const live = a.status !== "Cleared" && a.status !== "Acknowledged";
+    await describeAlert({ id: a.id, severity: a.severity, condition: a.condition, place }, cam, place, () => {}, undefined, cam && live ? Date.now() : 0).catch(() => {});
     await refreshPlain();
     setBusy("");
   };

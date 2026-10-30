@@ -175,7 +175,8 @@ std::string Bridge::handle(const std::string& request_json) {
             const bool requested = stream_ != nullptr && stream_->can_describe();
             if (requested) {
                 stream_->send({{"cmd", "describe"}, {"alertId", alert_id}, {"prompt", prompt},
-                               {"severity", severity}, {"camId", cam}, {"place", place}});
+                               {"severity", severity}, {"camId", cam}, {"place", place},
+                               {"sceneTs", std::max<std::int64_t>(0, params.value("sceneTs", static_cast<std::int64_t>(0)))}});
             }
             audit_event("event.describe", alert_id, requested ? "slm" : "template");
             result = {{"alertId", alert_id}, {"text", facts}, {"slm", requested}};

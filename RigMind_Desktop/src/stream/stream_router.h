@@ -34,14 +34,15 @@ public:
             if (slm_) {
                 nlohmann::json with_scene = command;
                 nlohmann::json scene;
-                {
+                const std::string cam = command.value("camId", std::string());
+                const std::int64_t scene_ts = command.value("sceneTs", std::int64_t{0}); // 0 = no scene for this alert
+                if (!cam.empty() && scene_ts > 0) {
                     std::lock_guard<std::mutex> lock(scene_mutex_);
-                    const auto it = scenes_.find(command.value("camId", std::string()));
+                    const auto it = scenes_.find(cam); // this alert's own camera only
                     if (it != scenes_.end()) scene = it->second;
-                    else if (scenes_.size() == 1) scene = scenes_.begin()->second; // single camera: the id may be unset
                 }
-                // Only a scene from the last 15 s is used: older data would describe something that has gone.
-                if (scene.is_object() && std::llabs(now_unix_ms() - scene.value("ts", std::int64_t{0})) < 15000) {
+                // The scene must be from the moment of the alert (within 15 s of it), else it would describe something else.
+                if (scene.is_object() && std::llabs(scene_ts - scene.value("ts", std::int64_t{0})) < 15000) {
                     const std::string text = rigmind::scene_prompt_text(scene);
                     if (!text.empty()) with_scene["prompt"] = command.value("prompt", std::string()) + "\n" + text;
                 }

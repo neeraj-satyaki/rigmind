@@ -302,12 +302,12 @@ if(WIN32)
       StrCmp $0 `0` rm_slm_verify_@I@ rm_slm_fail_@I@
       rm_slm_verify_@I@:
       DetailPrint `Verifying part @I@ of @N@...`
-      nsExec::ExecToLog `$SYSDIR\cmd.exe /c @Q@@Q@$SYSDIR\certutil.exe@Q@ -hashfile @Q@$INSTDIR\slm-part@I@.zip@Q@ SHA256 | @Q@$SYSDIRindstr.exe@Q@ /i /c:@SLM_SHA@@Q@`
+      nsExec::ExecToLog `$SYSDIR\cmd.exe /c @Q@@Q@$SYSDIR\certutil.exe@Q@ -hashfile @Q@$INSTDIR\slm-part@I@.zip@Q@ SHA256 | @Q@$SYSDIR\findstr.exe@Q@ /i /c:@SLM_SHA@@Q@`
       Pop $0
       StrCmp $0 `0` rm_slm_unpack_@I@ rm_slm_fail_@I@
       rm_slm_unpack_@I@:
       DetailPrint `Installing part @I@ of @N@...`
-      nsExec::ExecToLog `$SYSDIR	ar.exe -xf @Q@$INSTDIR\slm-part@I@.zip@Q@ -C @Q@$INSTDIR@Q@`
+      nsExec::ExecToLog `$SYSDIR\tar.exe -xf @Q@$INSTDIR\slm-part@I@.zip@Q@ -C @Q@$INSTDIR@Q@`
       Pop $0
       Delete `$INSTDIR\slm-part@I@.zip`
       StrCmp $0 `0` rm_slm_done_@I@ rm_slm_fail_@I@
@@ -316,8 +316,7 @@ if(WIN32)
       StrCpy $R8 `0`
       DetailPrint `Part @I@ of the BitNet model could not be downloaded or failed its check.`
       IfSilent rm_slm_done_@I@ 0
-      MessageBox MB_OK|MB_ICONEXCLAMATION `The BitNet summary model could not be downloaded (no internet, blocked, or failed its integrity check).$$
-RigMind works without it and shows the standard sentence. Run this installer again with internet access to add it.`
+      MessageBox MB_OK|MB_ICONEXCLAMATION `The BitNet summary model could not be downloaded (no internet, blocked, or failed its integrity check).$\r$\nRigMind works without it and shows the standard sentence. Run this installer again with internet access to add it.`
       rm_slm_done_@I@:
 ]=])
             string(REPLACE "@I@" "${_slm_i}" _slm_nsis "${_slm_nsis}")
@@ -331,10 +330,7 @@ RigMind works without it and shows the standard sentence. Run this installer aga
       StrCpy $R8 `1`
       IfFileExists `$INSTDIR\slm\ggml-model-i2_s.gguf` rm_slm_asked 0
       IfSilent rm_slm_asked 0
-      MessageBox MB_YESNO|MB_ICONQUESTION `Add plain-language alert summaries (BitNet)?$$
-$$
-Yes: downloads a 1.2 GB model now. Summaries are written on this PC; it uses about 1.2 GB of memory while RigMind runs.$$
-No: alerts show the standard sentence. You can run this installer again later to add it.` IDYES rm_slm_asked
+      MessageBox MB_YESNO|MB_ICONQUESTION `Add plain-language alert summaries (BitNet)?$\r$\n$\r$\nYes: downloads a 1.2 GB model now. Summaries are written on this PC; it uses about 1.2 GB of memory while RigMind runs.$\r$\nNo: alerts show the standard sentence. You can run this installer again later to add it.` IDYES rm_slm_asked
       StrCpy $R8 `0`
       rm_slm_asked:
 ]=])
