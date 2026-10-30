@@ -125,6 +125,8 @@ struct Camera {
     gint64 red_wall_ms = 0;               // wall clock of the Red that is being saved
     gint64 last_red_ms = 0;
     guint evidence_timer = 0;
+    gint64 pace_last_us = 0, pace_last_pts = -1, gate_bypass_until_us = 0; // live pacer state (pacer thread only); reset per pipeline
+    int gate_misses = 0;
     std::atomic<gint64> rec_last_pts{0};  // last timestamp given to the recording branch
 };
 
@@ -244,13 +246,14 @@ std::string gpu_scale() {
 // the RTP timestamps describe the real send cadence and the browser needs almost no playout buffer.
 void lat_record(int slot, double ms);
 constexpr gint64 kMaxInferenceWaitUs = 300000;
+constexpr gint64 kGateBypassUs = 3000000;
 std::atomic<int> pace_released{0}, pace_dropped{0}, pace_timeouts{0};
 const bool inference_gate_off = std::getenv("RIGMIND_INFERENCE_GATE") && std::string(std::getenv("RIGMIND_INFERENCE_GATE")) == "0";
 
 GstPadProbeReturn on_pace_probe(GstPad* pad, GstPadProbeInfo* info, gpointer user) {
-    static gint64 last_us = 0;
-    static gint64 last_pts = -1;
     auto* cam = static_cast<Camera*>(user);
+    gint64& last_us = cam->pace_last_us;
+    gint64& last_pts = cam->pace_last_pts;
     const gint64 interval = static_cast<gint64>(G_USEC_PER_SEC / output_fps);
     gint64 now = g_get_monotonic_time();
     static const bool arrival_mode = std::getenv("RIGMIND_RATE_MODE") && std::string(std::getenv("RIGMIND_RATE_MODE")) == "arrival";
@@ -265,31 +268,42 @@ GstPadProbeReturn on_pace_probe(GstPad* pad, GstPadProbeInfo* info, gpointer use
         g_usleep(static_cast<gulong>(interval - (now - last_us)));
         now = g_get_monotonic_time();
     }
-    // Inference-paced release: the next frame goes out only when the models have finished the previous one, so every frame
-    // that is shown also reaches the models and its own detections can be drawn on it. (Models skip frames otherwise, and the
-    // burn-in would draw results of an older frame.) Bounded: a stuck model delays the video by at most kMaxInferenceWaitUs.
-    if (inference && !inference_gate_off) {
+    // Inference-paced release: with a viewer attached, the next frame goes out only when the models have finished the previous
+    // one, so every frame that is shown also reaches the models and its own detections can be drawn on it. (Models skip frames
+    // otherwise, and the burn-in would draw results of an older frame.) Never without a viewer (monitoring runs at its own pace),
+    // and never at the price of the video: a model that is not done after kMaxInferenceWaitUs gets the frame anyway, and two
+    // misses in a row switch the gate off for kGateBypassUs (stuck or CPU-only models must not freeze the picture).
+    if (inference && !inference_gate_off && cam->live_enabled.load(std::memory_order_relaxed) && now >= cam->gate_bypass_until_us) {
         const gint64 give_up = now + kMaxInferenceWaitUs;
         bool waited = false;
         while (!inference->ready_for_frame() && g_get_monotonic_time() < give_up) {
             g_usleep(2000);
             waited = true;
         }
-        if (!inference->ready_for_frame()) ++pace_timeouts;
+        const bool timed_out = !inference->ready_for_frame();
         now = g_get_monotonic_time();
-        if (waited) {
-            // The frame in hand is older than what arrived meanwhile: take the newest instead (drop this one).
-            guint queued = 0;
-            if (GstPad* peer = gst_pad_get_peer(pad)) {
-                if (GstElement* q = gst_pad_get_parent_element(peer)) {
-                    g_object_get(q, "current-level-buffers", &queued, nullptr);
-                    gst_object_unref(q);
-                }
-                gst_object_unref(peer);
+        if (timed_out) {
+            ++pace_timeouts;
+            if (++cam->gate_misses >= 2) {
+                cam->gate_misses = 0;
+                cam->gate_bypass_until_us = now + kGateBypassUs;
             }
-            if (queued > 0) {
-                ++pace_dropped;
-                return GST_PAD_PROBE_DROP;
+        } else {
+            cam->gate_misses = 0;
+            if (waited) {
+                // The frame in hand is older than what arrived meanwhile: take the newest instead (drop this one).
+                guint queued = 0;
+                if (GstPad* peer = gst_pad_get_peer(pad)) {
+                    if (GstElement* q = gst_pad_get_parent_element(peer)) {
+                        g_object_get(q, "current-level-buffers", &queued, nullptr);
+                        gst_object_unref(q);
+                    }
+                    gst_object_unref(peer);
+                }
+                if (queued > 0) {
+                    ++pace_dropped;
+                    return GST_PAD_PROBE_DROP;
+                }
             }
         }
     }
@@ -1204,6 +1218,10 @@ void start_pipeline(Camera& cam) {
     gst_pad_add_probe(alarm_in, GST_PAD_PROBE_TYPE_BUFFER, on_facts_probe, ews, nullptr);
     gst_object_unref(alarm_in);
     cam.rec_last_pts = 0;
+    cam.pace_last_us = 0;
+    cam.pace_last_pts = -1;
+    cam.gate_bypass_until_us = 0;
+    cam.gate_misses = 0;
     GstPad* rec_in = gst_element_get_static_pad(rec_queue, "sink");
     gst_pad_add_probe(rec_in, GST_PAD_PROBE_TYPE_BUFFER, on_rec_stamp, &cam, nullptr);
     gst_object_unref(rec_in);

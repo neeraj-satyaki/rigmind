@@ -778,6 +778,9 @@ void Inference::run(Worker& worker) {
             out << "P6 " << frame->width << " " << frame->height << " 255" << '\n';
             out.write(reinterpret_cast<const char*>(frame->rgb.data()), static_cast<std::streamsize>(frame->rgb.size()));
         }
+        // Test hook: RIGMIND_TEST_INFER_DELAY_MS=<ms> makes every model run that much slower (checks that a slow or stuck model
+        // never freezes the video or stops monitoring).
+        if (const char* delay = std::getenv("RIGMIND_TEST_INFER_DELAY_MS")) std::this_thread::sleep_for(std::chrono::milliseconds(std::atoi(delay)));
         const auto elapsed_us = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - started).count();
         worker.count.fetch_add(1);
         worker.total_us.fetch_add(static_cast<std::uint64_t>(elapsed_us));

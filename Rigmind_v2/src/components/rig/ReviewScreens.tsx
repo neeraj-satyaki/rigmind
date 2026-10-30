@@ -69,13 +69,29 @@ function DraftSummary({ eventId, context, sources }: { eventId: string; context:
   };
   const approve = async () => {
     if (!stored) return;
-    await persist({ ...stored, approval: { by: "Maha S.", role: "HSE reviewer", at: stamp() } });
+    await persist({ ...stored, approval: { by: demoDataEnabled() ? "Maha S." : "Operator", role: "HSE reviewer", at: stamp() } });
     toast.success("Summary approved by HSE for report inclusion");
   };
   const generate = async () => {
     setLoading(true);
     setError("");
     try {
+      if (isNative()) {
+        // The desktop app has no cloud AI gateway: build the draft from the recorded facts only, and say so.
+        const lines = context.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+        await persist({
+          eventId,
+          draft: {
+            summary: `Drafted on this device from the recorded facts only (no AI model is used here). ${lines.slice(0, 2).join(" ")}`.trim(),
+            recordedFacts: lines.slice(0, 10),
+            missingInformation: ["Cause of the event is not recorded", "People involved and their actions are not recorded", "Outcome and follow-up are not recorded"],
+          },
+          sources,
+          generatedAt: stamp(),
+          approval: null,
+        });
+        return;
+      }
       const r = await run({ data: { eventId, context } });
       if (r.error) setError(r.error);
       else if (r.draft)

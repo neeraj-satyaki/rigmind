@@ -38,3 +38,4 @@ RigMind_Desktop/tests/validation/*.jsonl
 *.log
 RigMind_Desktop/tests/cases/test_cases.csv
 RigMind_Desktop/gpu-pack/install-gpu.cmd
+RigMind_Desktop/tests/e2e/inspect-out.json
