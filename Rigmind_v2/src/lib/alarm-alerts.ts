@@ -3,6 +3,7 @@ import { alertToastOptions } from "@/lib/alert-colors";
 import { raiseAlert, updateAlert, type AlertPhase, type RaisedAlert } from "./alert-bus";
 import { isNative, onNativeEvent, type NativeEvent } from "./native-bridge";
 import { describeAlert } from "./plain-summary";
+import { setAlertLoop } from "./alert-sound";
 
 /** EWS alarm state -> app alert severity (same names the alert inbox and tones use). */
 export const ALARM_SEVERITY = { Yellow: "Advisory", Orange: "Warning", Red: "Critical" } as const;
@@ -88,6 +89,8 @@ export function handleAlarmEvent(msg: NativeEvent): RaisedAlert | undefined {
   if (msg.ev !== "alarm" || typeof msg.cam !== "string" || !msg.cam) return;
   const state = msg["state"];
   if (state !== "None" && state !== "Yellow" && state !== "Orange" && state !== "Red") return;
+  // The tone loops while the alarm is Orange or Red and stops when it falls back to Yellow (or clears).
+  setAlertLoop(msg.cam, state === "Red" ? "Critical" : state === "Orange" ? "Warning" : null);
   const ep = episodes.get(msg.cam) ?? { n: 1, last: "None" };
   episodes.set(msg.cam, ep);
   const hostId = str(msg["alertId"]);
@@ -140,7 +143,11 @@ function levelName(level: number): Live {
 let stop: (() => void) | undefined;
 /** Subscribes once to host alarm events. Idempotent; returns the unsubscribe function. */
 export function startAlarmAlerts(): () => void {
-  stop ??= onNativeEvent(handleAlarmEvent);
+  // A camera that goes offline cannot report its alarm clearing: its looping tone stops too.
+  stop ??= onNativeEvent((msg) => {
+    if (msg.ev === "status" && msg["state"] === "offline" && typeof msg.cam === "string") setAlertLoop(msg.cam, null);
+    handleAlarmEvent(msg);
+  });
   return () => {
     stop?.();
     stop = undefined;

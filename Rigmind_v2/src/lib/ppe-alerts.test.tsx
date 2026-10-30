@@ -16,7 +16,7 @@ vi.mock("@/lib/native-bridge", () => ({
   },
 }));
 // The real tone map has no sound for Advisory; the mock keeps that rule so a tone for a PPE alert would show up here.
-vi.mock("@/lib/alert-sound", () => ({ playAlertSound: (s: string) => s !== "Advisory" && h.tones.push(s) }));
+vi.mock("@/lib/alert-sound", () => ({ playAlertSound: (s: string) => s !== "Advisory" && h.tones.push(s), setAlertLoop: () => {} }));
 vi.mock("@/lib/device-db", () => ({ listDevice: async () => [], writeDevice: async () => {} }));
 vi.mock("sonner", () => {
   const t: any = (title: string, opts: any) => h.toasts.push({ title, opts });
@@ -71,7 +71,7 @@ describe("PPE compliance events -> alerts", () => {
     // theme-coloured, slightly blurred toast with thick yellow text
     const glass = alertToastOptions("Advisory").style;
     expect(h.toasts[0]!.opts.style).toMatchObject({ color: glass.color, backdropFilter: expect.stringContaining("blur") });
-    expect(String((h.toasts[0]!.opts.style as { background: string }).background)).toContain("var(--popover)");
+    expect(String((h.toasts[0]!.opts.style as { background: string }).background)).toBe("var(--toast-bg)");
     expect(glass.color).toBe("var(--toast-yellow)");
     expect(h.tones).toHaveLength(0); // quiet
     expect(h.calls.filter((c) => c.method === "alert.raise")).toHaveLength(0); // the host stored the row

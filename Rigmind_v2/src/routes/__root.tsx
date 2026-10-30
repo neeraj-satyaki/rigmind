@@ -86,6 +86,10 @@ export const Route = createRootRouteWithContext<{ queryClient: QueryClient }>()(
       { title: "RigMind" },
       { name: "description", content: "Rig safety operations workspace." },
     ],
+    scripts: [
+      // Before the first paint: apply the saved theme so the boot splash and the app start in the right colours.
+      { children: "try{if(localStorage.getItem('rm-theme')==='dark')document.documentElement.classList.add('dark')}catch(e){}" },
+    ],
     links: [
       { rel: "preconnect", href: "https://fonts.googleapis.com" },
       { rel: "preconnect", href: "https://fonts.gstatic.com", crossOrigin: "anonymous" },

@@ -192,7 +192,8 @@ export const auditActor = (source: string) =>
   source === "ui" ? "Operator (this device)" : source === "backend" ? "Host" : source ? `Host (${source})` : "Host";
 
 /** Real audit rows for the given actions, newest first. Empty outside the desktop host. */
-export async function loadAuditEntries(actions: readonly string[] = AUDIT_ACTIONS, limit = 200): Promise<AuditEntry[]> {
+/** `limit` rows are read per action (so rare actions such as camera status are never crowded out); `total` caps the merged list. */
+export async function loadAuditEntries(actions: readonly string[] = AUDIT_ACTIONS, limit = 200, total = 1000): Promise<AuditEntry[]> {
   if (!isNative()) return [];
   const parts = await Promise.all(
     actions.map((action) =>
@@ -201,7 +202,7 @@ export async function loadAuditEntries(actions: readonly string[] = AUDIT_ACTION
         .catch(() => [] as AuditEntry[]),
     ),
   );
-  return parts.flat().sort((a, b) => b.tsMs - a.tsMs || b.id - a.id).slice(0, limit);
+  return parts.flat().sort((a, b) => b.tsMs - a.tsMs || b.id - a.id).slice(0, total);
 }
 
 /** Records a change made on these pages in the host's audit log (no-op outside the host). */

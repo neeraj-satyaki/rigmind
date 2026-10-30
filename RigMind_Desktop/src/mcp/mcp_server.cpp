@@ -23,9 +23,21 @@ const char* kInstructions =
     "get_live_scene returns what the models see right now (class names, mask contours, centroid paths as pixel coordinates of the "
     "frame size given). Everything is read-only except request_summary, which asks the on-device BitNet model for one alert.";
 
+// Cuts at a character boundary (never inside a multi-byte sequence) so the result stays valid UTF-8.
+std::string clip_utf8(std::string s, std::size_t max) {
+    if (s.size() <= max) return s;
+    std::size_t cut = max;
+    while (cut > 0 && (static_cast<unsigned char>(s[cut]) & 0xC0) == 0x80) --cut;
+    s.resize(cut);
+    return s;
+}
+
+// Serialises without throwing on invalid UTF-8 (database text may hold anything): bad bytes become U+FFFD.
+std::string safe_dump(const json& v, int indent = -1) { return v.dump(indent, ' ', false, json::error_handler_t::replace); }
+
 // MCP tool result: one text block holding JSON.
 json text_result(const json& value, bool is_error = false) {
-    return {{"content", json::array({{{"type", "text"}, {"text", value.is_string() ? value.get<std::string>() : value.dump(2)}}})},
+    return {{"content", json::array({{{"type", "text"}, {"text", value.is_string() ? value.get<std::string>() : safe_dump(value, 2)}}})},
             {"isError", is_error}};
 }
 
@@ -58,9 +70,7 @@ int clamp_int(const json& args, const char* key, int fallback, int lo, int hi) {
 
 std::string str_arg(const json& args, const char* key, std::size_t max_len = 256) {
     if (!args.is_object() || !args.contains(key) || !args[key].is_string()) return {};
-    std::string s = args[key].get<std::string>();
-    if (s.size() > max_len) s.resize(max_len);
-    return s;
+    return clip_utf8(args[key].get<std::string>(), max_len);
 }
 
 std::string lower_ext(const std::filesystem::path& p) {
@@ -90,7 +100,7 @@ json tool(const char* name, const char* description, json input) {
 const char* kAuditActions[] = {"alarm.transition", "alarm.cycle", "alert.respond", "ppe.transition", "event.describe", "summary.ready",
                                "camera.status", "evidence.started", "evidence.saved", "evidence.snapshot", "footage.save",
                                "notification.tray", "stream.open", "stream.close", "app.start", "app.stop", "app.error", "slm.start",
-                               "pipeline.start", "report.pdf"};
+                               "pipeline.start", "report.pdf", "mcp.start", "mcp.call", "mcp.set"};
 
 } // namespace
 
@@ -107,25 +117,47 @@ std::int64_t McpServer::now() const { return hooks_.now_ms(); }
 
 json McpServer::handle(const json& request) {
     if (request.is_array()) {
+        // A batch is one level deep and at most 32 messages: no recursion on attacker-shaped input.
+        if (request.empty() || request.size() > 32) return rpc_error(nullptr, -32600, "batch must hold 1 to 32 messages");
         json out = json::array();
         for (const json& one : request) {
-            const json r = handle(one);
+            if (one.is_array()) {
+                out.push_back(rpc_error(nullptr, -32600, "nested batches are not allowed"));
+                continue;
+            }
+            const json r = handle_one(one);
             if (!r.is_null()) out.push_back(r);
         }
         return out.empty() ? json(nullptr) : out;
     }
-    if (!request.is_object() || request.value("jsonrpc", std::string()) != "2.0" || !request.contains("method") || !request["method"].is_string())
-        return rpc_error(request.is_object() ? request.value("id", json(nullptr)) : json(nullptr), -32600, "invalid request");
+    return handle_one(request);
+}
+
+json McpServer::handle_one(const json& request) {
+    try {
+        return dispatch(request);
+    } catch (const std::exception& e) { // any malformed shape ends here as a JSON-RPC error, never as a crash
+        const json id = request.is_object() && request.contains("id") && (request["id"].is_string() || request["id"].is_number()) ? request["id"] : json(nullptr);
+        return rpc_error(id, -32603, std::string("internal error: ") + e.what());
+    }
+}
+
+json McpServer::dispatch(const json& request) {
+    const json no_id = nullptr;
+    if (!request.is_object() || !request.contains("jsonrpc") || !request["jsonrpc"].is_string() || request["jsonrpc"].get<std::string>() != "2.0" ||
+        !request.contains("method") || !request["method"].is_string())
+        return rpc_error(no_id, -32600, "invalid request");
     const std::string method = request["method"].get<std::string>();
     const bool notification = !request.contains("id");
+    if (!notification && !(request["id"].is_string() || request["id"].is_number() || request["id"].is_null())) return rpc_error(no_id, -32600, "invalid id");
     const json id = notification ? json(nullptr) : request["id"];
-    const json params = request.value("params", json::object());
+    const json params = request.contains("params") && request["params"].is_object() ? request["params"] : json::object();
     if (notification) return nullptr; // notifications/initialized, notifications/cancelled: nothing to answer
 
     try {
         if (method == "initialize") {
             std::string version = kProtocolVersions[0];
-            const std::string asked = params.is_object() ? params.value("protocolVersion", std::string()) : std::string();
+            const std::string asked = params.contains("protocolVersion") && params["protocolVersion"].is_string() ? params["protocolVersion"].get<std::string>() : std::string();
             for (const char* v : kProtocolVersions)
                 if (asked == v) version = v;
             return rpc_result(id, {{"protocolVersion", version},
@@ -137,7 +169,7 @@ json McpServer::handle(const json& request) {
         if (method == "tools/list") return rpc_result(id, {{"tools", tools_list()}});
         if (method == "tools/call") {
             if (!params.is_object() || !params.contains("name") || !params["name"].is_string()) return rpc_error(id, -32602, "tools/call needs a name");
-            const json args = params.value("arguments", json::object());
+            const json args = params.contains("arguments") && params["arguments"].is_object() ? params["arguments"] : json::object();
             try {
                 return rpc_result(id, call_tool(params["name"].get<std::string>(), args));
             } catch (const std::exception& e) {
@@ -150,9 +182,10 @@ json McpServer::handle(const json& request) {
                                                                       {{"uriTemplate", "rigmind://alert/{id}"}, {"name", "One alert with its history"}, {"mimeType", "application/json"}}})}});
         if (method == "resources/read") {
             if (!params.is_object() || !params.contains("uri") || !params["uri"].is_string()) return rpc_error(id, -32602, "resources/read needs a uri");
-            const std::string uri = params["uri"].get<std::string>();
+            const std::string uri = clip_utf8(params["uri"].get<std::string>(), 200);
+            if (hooks_.audit) hooks_.audit("resources/read", uri); // resources are data access like tools
             const json body = read_resource(uri);
-            return rpc_result(id, {{"contents", json::array({{{"uri", uri}, {"mimeType", "application/json"}, {"text", body.dump(2)}}})}});
+            return rpc_result(id, {{"contents", json::array({{{"uri", uri}, {"mimeType", "application/json"}, {"text", safe_dump(body, 2)}}})}});
         }
         return rpc_error(id, -32601, "method not found: " + method);
     } catch (const std::invalid_argument& e) {
@@ -188,7 +221,7 @@ json McpServer::tools_list() const {
 }
 
 json McpServer::call_tool(const std::string& name, const json& args) {
-    if (hooks_.audit) hooks_.audit(name, args.is_object() ? args.dump().substr(0, 300) : std::string());
+    if (hooks_.audit) hooks_.audit(name, args.is_object() ? clip_utf8(safe_dump(args), 300) : std::string());
     if (name == "get_live_scene") {
         const json scene = scene_for(args);
         return text_result(scene);
@@ -247,7 +280,7 @@ json McpServer::call_tool(const std::string& name, const json& args) {
     if (name == "get_evidence") {
         json images = json::array();
         const json detail = evidence_detail(args, images);
-        json content = json::array({{{"type", "text"}, {"text", detail.dump(2)}}});
+        json content = json::array({{{"type", "text"}, {"text", safe_dump(detail, 2)}}});
         for (const json& img : images) content.push_back(img);
         return {{"content", content}, {"isError", false}};
     }

@@ -53,6 +53,24 @@ void respond(SOCKET s, int status, const char* reason, const std::string& body, 
     send_all(s, out.str());
 }
 
+// Deepest nesting of [ and { outside strings. A 1 MB body of "[[[[..." must not reach the JSON parser and its recursive cleanup.
+int json_depth(const std::string& text) {
+    int depth = 0, deepest = 0;
+    bool in_string = false, escaped = false;
+    for (char c : text) {
+        if (in_string) {
+            if (escaped) escaped = false;
+            else if (c == '\\') escaped = true;
+            else if (c == '"') in_string = false;
+            continue;
+        }
+        if (c == '"') in_string = true;
+        else if (c == '[' || c == '{') deepest = (std::max)(deepest, ++depth);
+        else if (c == ']' || c == '}') --depth;
+    }
+    return deepest;
+}
+
 std::string error_body(const std::string& message) { return nlohmann::json{{"error", message}}.dump(); }
 
 } // namespace
@@ -194,6 +212,7 @@ void McpHttp::serve(SOCKET client) {
     }
     body.resize(length);
 
+    if (json_depth(body) > 32) return respond(client, 400, "Bad Request", error_body("JSON is nested too deeply"));
     nlohmann::json request;
     try {
         request = nlohmann::json::parse(body);
@@ -201,9 +220,13 @@ void McpHttp::serve(SOCKET client) {
         return respond(client, 400, "Bad Request",
                        nlohmann::json{{"jsonrpc", "2.0"}, {"id", nullptr}, {"error", {{"code", -32700}, {"message", "parse error"}}}}.dump());
     }
-    const nlohmann::json answer = server_.handle(request);
-    if (answer.is_null()) return respond(client, 202, "Accepted", {}); // a notification: nothing to say
-    respond(client, 200, "OK", answer.dump());
+    try {
+        const nlohmann::json answer = server_.handle(request);
+        if (answer.is_null()) return respond(client, 202, "Accepted", {}); // a notification: nothing to say
+        respond(client, 200, "OK", answer.dump(-1, ' ', false, nlohmann::json::error_handler_t::replace));
+    } catch (const std::exception&) {
+        respond(client, 500, "Internal Server Error", nlohmann::json{{"jsonrpc", "2.0"}, {"id", nullptr}, {"error", {{"code", -32603}, {"message", "internal error"}}}}.dump());
+    }
 }
 
 } // namespace rigmind

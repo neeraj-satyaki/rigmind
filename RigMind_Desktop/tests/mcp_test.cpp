@@ -94,6 +94,8 @@ static int run() {
     hooks.now_ms = [now] { return now; };
     hooks.scene = [&](const std::string& cam) { return cam.empty() || cam == "CAM-01" ? live_scene : json(nullptr); };
     hooks.scene_cameras = [] { return std::vector<std::string>{"CAM-01"}; };
+    std::vector<std::string> audited;
+    hooks.audit = [&](const std::string& tool, const std::string& detail) { audited.push_back(tool + "|" + detail); };
     hooks.request_summary = [&](const json& alert, int) {
         asked = alert;
         return json{{"text", "Camera CAM-01, Camera CAM-01: stop the work."}, {"source", "slm"}};
@@ -164,6 +166,29 @@ static int run() {
     check(rpc(server, 10, "resources/read", {{"uri", "rigmind://alerts"}})["result"]["contents"].size() == 1, "alerts resource");
     check(rpc(server, 11, "resources/read", {{"uri", "file:///etc/passwd"}}).contains("error"), "foreign uri refused");
 
+    // hardening: malformed shapes are errors, never crashes
+    check(server.handle({{"jsonrpc", 2}, {"method", "ping"}, {"id", 1}})["error"]["code"] == -32600, "jsonrpc of the wrong type is an invalid request");
+    check(server.handle({{"jsonrpc", "2.0"}, {"method", 5}, {"id", 1}})["error"]["code"] == -32600, "method of the wrong type is an invalid request");
+    check(server.handle({{"jsonrpc", "2.0"}, {"method", "ping"}, {"id", json::array()}})["error"]["code"] == -32600, "id of the wrong type is invalid");
+    check(rpc(server, 20, "initialize", {{"protocolVersion", 5}})["result"]["protocolVersion"] == "2025-06-18", "non-string protocolVersion falls back");
+    check(rpc(server, 21, "tools/call", {{"name", "list_alerts"}, {"arguments", 5}}).contains("result"), "non-object arguments are treated as empty");
+    check(tool(server, "list_alerts", {{"limit", "x"}, {"status", 5}}).contains("result"), "wrong argument types do not throw");
+    check(server.handle(json::array({json::array({1})}))[0]["error"]["code"] == -32600, "nested batch is refused");
+    json big = json::array();
+    for (int i = 0; i < 40; ++i) big.push_back({{"jsonrpc", "2.0"}, {"id", i}, {"method", "ping"}});
+    check(server.handle(big)["error"]["code"] == -32600, "oversized batch is refused");
+    check(server.handle(json::array())["error"]["code"] == -32600, "empty batch is refused");
+    // a multi-byte character cut by the argument clip must not corrupt the result (alertId limit is 32 bytes)
+    const std::string accents(40, 'x');
+    std::string wide;
+    for (int i = 0; i < 20; ++i) wide += "\xC3\xA9"; // 40 bytes of e-acute
+    check(tool(server, "get_alert", {{"alertId", wide}}).dump().size() > 0, "clipped multi-byte id stays serialisable");
+    // every data read is audited: tools and resources
+    const std::size_t before = audited.size();
+    rpc(server, 22, "resources/read", {{"uri", "rigmind://alerts"}});
+    check(audited.size() == before + 1 && audited.back().rfind("resources/read|rigmind://alerts", 0) == 0, "resources/read is audited");
+    check(!audited.empty() && audited.front().rfind("list_alerts|", 0) == 0, "tool calls are audited");
+
     // HTTP transport
     const std::string token = rigmind::load_or_create_mcp_token(dir / "mcp-token.txt");
     check(token.size() == 64 && rigmind::load_or_create_mcp_token(dir / "mcp-token.txt") == token, "token created once, then reused");
@@ -183,6 +208,8 @@ static int run() {
     check(http(port, "POST", "/other", host + auth, rpc_body).rfind("404", 0) == 0, "other paths are 404");
     check(http(port, "POST", "/mcp", host + auth, "{not json").rfind("400", 0) == 0, "bad JSON is 400");
     check(http(port, "POST", "/mcp", host + auth, R"({"jsonrpc":"2.0","method":"notifications/initialized"})").rfind("202", 0) == 0, "notification is 202");
+    check(http(port, "POST", "/mcp", host + auth, std::string(200000, '[')).rfind("400", 0) == 0, "deeply nested JSON is refused before parsing");
+    check(http(port, "POST", "/mcp", host + auth, R"({"jsonrpc":7,"method":"ping","id":1})").rfind("200\n", 0) == 0, "wrong-typed fields give a JSON-RPC error, not a dropped connection");
     http_server.stop();
     check(http(port, "POST", "/mcp", host + auth, rpc_body) == "connect failed", "stopped listener refuses connections");
 

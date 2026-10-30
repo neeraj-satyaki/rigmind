@@ -88,6 +88,11 @@ export function AppState({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     document.documentElement.classList.toggle("dark", dark);
+    try {
+      localStorage.setItem("rm-theme", dark ? "dark" : "light"); // read by the head script so the next start paints the right theme (and boot splash) at once
+    } catch {
+      /* storage blocked: the saved preference still applies once loaded */
+    }
   }, [dark]);
   return (
     <Context.Provider

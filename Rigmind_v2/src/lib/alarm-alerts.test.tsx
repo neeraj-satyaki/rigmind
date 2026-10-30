@@ -6,6 +6,7 @@ const h = vi.hoisted(() => ({
   calls: [] as { method: string; params: any }[],
   toasts: [] as string[],
   tones: [] as string[],
+  loops: [] as [string, string | null][],
   os: [] as string[],
   native: false, // the desktop host raises the Windows notification itself; the page does it only outside the host
 }));
@@ -17,7 +18,7 @@ vi.mock("@/lib/native-bridge", () => ({
     return method === "event.describe" ? { text: "template text", slm: false } : {};
   },
 }));
-vi.mock("@/lib/alert-sound", () => ({ playAlertSound: (s: string) => h.tones.push(s) }));
+vi.mock("@/lib/alert-sound", () => ({ playAlertSound: (s: string) => h.tones.push(s), setAlertLoop: (k: string, s: string | null) => h.loops.push([k, s]) }));
 vi.mock("@/lib/device-db", () => ({ listDevice: async () => [], writeDevice: async () => {} }));
 vi.mock("sonner", () => {
   const t: any = (m: string) => h.toasts.push(m);
@@ -225,5 +226,44 @@ describe("event cycles (host closed field)", () => {
     await run(() => line("Yellow", "ALM-CAM-01-c1"));
     await run(() => line("None", "ALM-CAM-01-c1", { alertId: "ALM-CAM-01-c1", peak: 0, critical: false, cycle: "Y>N", kind: "normal" }));
     expect(describes()).toHaveLength(0);
+  });
+});
+
+describe("looping alarm tone", () => {
+  let stop: () => void;
+  beforeEach(() => {
+    vi.useFakeTimers();
+    h.listeners.clear();
+    h.loops.length = 0;
+    h.native = true;
+    resetAlarmAlerts();
+    stop = startAlarmAlerts();
+  });
+  afterEach(() => {
+    stop();
+    vi.useRealTimers();
+  });
+  const line = (state: string, cam = "CAM-01") =>
+    h.listeners.forEach((l) => l({ ev: "alarm", cam, state, condition: "x", place: "p", alertId: `ALM-${cam}-a1` }));
+
+  it("loops on Orange, escalates to the Red tone, and stops when the alarm is back to Yellow", () => {
+    line("Yellow");
+    expect(h.loops.at(-1)).toEqual(["CAM-01", null]); // Yellow: silent
+    line("Orange");
+    expect(h.loops.at(-1)).toEqual(["CAM-01", "Warning"]);
+    line("Red");
+    expect(h.loops.at(-1)).toEqual(["CAM-01", "Critical"]);
+    line("Orange");
+    expect(h.loops.at(-1)).toEqual(["CAM-01", "Warning"]);
+    line("Yellow");
+    expect(h.loops.at(-1)).toEqual(["CAM-01", null]);
+  });
+  it("stops when the alarm clears to None, and when the camera goes offline", () => {
+    line("Red");
+    line("None");
+    expect(h.loops.at(-1)).toEqual(["CAM-01", null]);
+    line("Orange", "CAM-02");
+    h.listeners.forEach((l) => l({ ev: "status", cam: "CAM-02", state: "offline" }));
+    expect(h.loops.at(-1)).toEqual(["CAM-02", null]);
   });
 });

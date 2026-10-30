@@ -49,6 +49,8 @@ public:
     static constexpr const char* kServerVersion = "1.0.0";
 
 private:
+    nlohmann::json handle_one(const nlohmann::json& request); // never throws
+    nlohmann::json dispatch(const nlohmann::json& request);
     nlohmann::json tools_list() const;
     nlohmann::json call_tool(const std::string& name, const nlohmann::json& args);
     nlohmann::json resources_list();

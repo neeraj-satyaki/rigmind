@@ -77,6 +77,7 @@
 :root {
   /* alert toast text: strong enough to read on the light theme background */
   --toast-yellow: #a16207; --toast-orange: #c2410c; --toast-red: #b91c1c;
+  --toast-bg: color-mix(in srgb, var(--popover) 34%, transparent); /* theme colour, see-through */
   --radius: 8px;
   --background: #f1f4f7;
   --foreground: #172131;
@@ -159,6 +160,7 @@
 
 .dark {
  --toast-yellow: #ffd60a; --toast-orange: #ff9a3d; --toast-red: #ff5c5c;
+ --toast-bg: rgba(22, 41, 74, 0.58); /* the loading-screen navy (#16294A), see-through */
  color-scheme: dark;
  --background: #16191e; --foreground: #eef1f5; --card: #20252c; --card-foreground: #eef1f5;
  --popover: #20252c; --popover-foreground: #eef1f5; --field: #292f37; --border: #3b444e; --input: #3b444e;
