@@ -29,6 +29,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 PF = Path(os.environ.get("ProgramFiles", r"C:\Program Files"))
 DEFAULT_APP = PF / "RigMind"
+BITNET = True
 SAMPLE_STRINGS = ["EV-1042", "Faisal A.", "Maha S.", "Demo rig 01", "faisal.demo@example.com"]
 ERR_PAGE_RE = re.compile(r"Page not found|\b404\b|This page didn't load|Something went wrong|Not Found", re.I)
 BENIGN_CONSOLE = re.compile(r"fonts\.(googleapis|gstatic)|favicon|ERR_INTERNET_DISCONNECTED|ERR_NAME_NOT_RESOLVED|net::ERR_FAILED.*font|Autofocus", re.I)
@@ -241,6 +242,15 @@ def drive_wizard(kind: str, phase: str, demo: bool | None, inspect: bool, timeou
                         click_real(c)
                         break
                 R.add(phase, "sample-data question shown and answered", True, f"answered {want}")
+            elif "bitnet" in lt and "summaries" in lt:
+                want = "Yes" if BITNET else "No"
+                banner(f"BitNet summaries question  ->  answering {want.upper()} (test option --bitnet {'yes' if BITNET else 'no'})")
+                pause(2)
+                for c in mb.descendants():
+                    if c.class_name() == "Button" and clean(c.window_text()).lower() == want.lower():
+                        click_real(c)
+                        break
+                R.add(phase, "BitNet question shown and answered", True, f"answered {want}")
             else:
                 # Anything else is reported; positive/default button is pressed so the run can continue.
                 pause(2)
@@ -450,6 +460,15 @@ def verify_install(a, ph: str, present: bool) -> None:
         need = ["RigMind.exe", "rigmind-pipeline.exe", "web/index.html", "models/ppe.onnx", "models/idss_model.onnx", "models/inference.cfg", "Uninstall.exe"]
         for n in need:
             R.add(ph, f"file {n}", (app / n).exists(), str(app / n))
+        # BitNet: server from the installer, model downloaded in two parts, joined, parts removed.
+        model = app / "slm" / "ggml-model-i2_s.gguf"
+        R.add(ph, "slm\llama-server.exe installed", (app / "slm" / "llama-server.exe").exists(), str(app / "slm"))
+        if BITNET:
+            ok_size = model.exists() and model.stat().st_size == 1187801280
+            R.add(ph, "BitNet model downloaded and joined (1,187,801,280 bytes)", ok_size, f"{model.stat().st_size if model.exists() else 'missing'}")
+            R.add(ph, "BitNet part files removed", not list((app / "slm").glob("*.part*")) and not list(app.glob("slm-part*.zip")), "clean")
+        else:
+            R.add(ph, "BitNet model absent (--bitnet no)", not model.exists(), f"exists={model.exists()}")
         gpu = list((app / "gpu").glob("*.dll")) if (app / "gpu").exists() else []
         R.add(ph, "gpu\\ has >= 9 dlls", len(gpu) >= 9, f"{len(gpu)} dlls in {app / 'gpu'}")
         sc = shortcut_locations()
@@ -1863,6 +1882,25 @@ def phase6_live(ctx, a) -> None:
         ui.nav("Evidence library")
     ui.shot("6-evidence")
     R.add(ph, "Evidence library lists saved footage", True if n_clip else None, f"{n_clip} clip elements" if n_clip else f"not observed within {a.evidence_wait}s (needs a finished Red episode)")
+    # BitNet: ask for a plain-language summary through the bridge and wait for the audited result.
+    if BITNET:
+        try:
+            base = len(bridge(pg, "audit.recent", {"action": "summary.ready", "limit": 200}).get("result") or [])
+            reply = bridge(pg, "event.describe", {"alertId": "E2E-BITNET-1", "severity": "Warning", "condition": "Elevator near the platform",
+                                                  "place": "Demo rig 01 · Derrick board", "camId": "CAM-01", "tsMs": int(time.time() * 1000),
+                                                  "sceneTs": int(time.time() * 1000)})
+            got = []
+            t_sum = time.time()
+            while time.time() - t_sum < 120 and not got:
+                time.sleep(3)
+                rows = bridge(pg, "audit.recent", {"action": "summary.ready", "limit": 200}).get("result") or []
+                got = [r for r in rows if r.get("target") == "E2E-BITNET-1"]
+            detail = got[0].get("detail", "") if got else ""
+            R.add(ph, "BitNet summary produced (audit summary.ready, source slm)", detail.startswith("slm"), f"{round(time.time() - t_sum)}s; {detail[:160] or 'no summary.ready row'}; reply={json.dumps(reply)[:120]}")
+            slm = bridge(pg, "audit.recent", {"action": "slm.start", "limit": 5}).get("result") or []
+            R.add(ph, "audit slm.start = running", any("running" in r.get("detail", "") for r in slm), json.dumps(slm[:1])[:160])
+        except Exception as e:  # noqa: BLE001
+            R.add(ph, "BitNet summary check", False, str(e)[:200])
     ctx["seen_alarm"] = seen
 
 
@@ -2083,6 +2121,7 @@ def parse():
     p = argparse.ArgumentParser(description="RigMind visible end-to-end test")
     p.add_argument("installer", nargs="?", help="RigMind-1.0.0-win64*.exe (needed unless --no-install)")
     p.add_argument("--demo", choices=["yes", "no"], default="no", help="answer to the installer's sample-data question (default no)")
+    p.add_argument("--bitnet", choices=["yes", "no"], default="yes", help="answer to the installer's BitNet question (default yes)")
     p.add_argument("--no-install", action="store_true")
     p.add_argument("--no-uninstall", action="store_true")
     p.add_argument("--app-dir", default=str(DEFAULT_APP), help="folder holding RigMind.exe (default: the installed one)")
@@ -2111,6 +2150,8 @@ def parse():
 def main() -> int:
     global OUT, SHOTS, PACE
     a = parse()
+    global BITNET
+    BITNET = a.bitnet == "yes"
     PACE = a.pace
     if a.elevate and not is_admin():
         banner("Approve the UAC prompt", "The test re-launches itself elevated so it can drive the installer wizard.")

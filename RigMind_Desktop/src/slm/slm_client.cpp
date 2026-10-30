@@ -3,7 +3,6 @@
 #include <winhttp.h>
 
 #include <stdexcept>
-#include <thread>
 
 #include "slm/slm_guard.h"
 
@@ -17,7 +16,7 @@ std::string post_json(unsigned short port, const std::string& body) {
     HINTERNET session = WinHttpOpen(L"RigMind", WINHTTP_ACCESS_TYPE_NO_PROXY, WINHTTP_NO_PROXY_NAME,
                                     WINHTTP_NO_PROXY_BYPASS, 0);
     if (!session) throw std::runtime_error("WinHttpOpen failed");
-    WinHttpSetTimeouts(session, 60000, 60000, 60000, 60000);
+    WinHttpSetTimeouts(session, 60000, 60000, 60000, 300000); // requests queue in the server behind other summaries: wait up to 5 minutes for the answer
     HINTERNET connection = WinHttpConnect(session, L"127.0.0.1", port, 0);
     HINTERNET request = connection ? WinHttpOpenRequest(connection, L"POST", L"/v1/chat/completions", nullptr,
                                                         WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, 0)
@@ -48,7 +47,7 @@ std::string post_json(unsigned short port, const std::string& body) {
 // Worker: asks the model, applies the sentence rules, and sends the description event. Takes copies only.
 void ask_model(unsigned short port, SlmClient::OnLine on_line, nlohmann::json command) {
     std::string text, reason;
-    bool action_added = false;
+    bool action_added = false, context_added = false;
     try {
         const nlohmann::json body = {
             {"messages", {{{"role", "system"}, {"content", kSystemMessage}},
@@ -58,15 +57,21 @@ void ask_model(unsigned short port, SlmClient::OnLine on_line, nlohmann::json co
         };
         const nlohmann::json reply = nlohmann::json::parse(post_json(port, body.dump()));
         const std::string sentence = rigmind::first_sentences(reply.at("choices").at(0).at("message").at("content").get<std::string>(), 2);
-        reason = rigmind::reject_reason(sentence, command);
-        if (reason.empty()) text = rigmind::with_action(sentence, command.value("severity", std::string()), &action_added);
+        std::string candidate = sentence;
+        reason = rigmind::reject_reason(candidate, command);
+        if (reason == "missing camera" || reason == "missing place") {
+            candidate = rigmind::with_context(candidate, command); // the model left out the camera or place: add them in front
+            context_added = candidate != sentence;
+            reason = rigmind::reject_reason(candidate, command);
+        }
+        if (reason.empty()) text = rigmind::with_action(candidate, command.value("severity", std::string()), &action_added);
     } catch (const std::exception&) {
         reason = "model unavailable";
         text.clear(); // model down or answer unusable: the template text stands
     }
     on_line(nlohmann::json{{"ev", "description"}, {"alertId", command.value("alertId", std::string())},
                            {"text", text.empty() ? nlohmann::json(nullptr) : nlohmann::json(text)},
-                           {"source", text.empty() ? "template" : "slm"}, {"reason", reason}, {"action_added", action_added}}
+                           {"source", text.empty() ? "template" : "slm"}, {"reason", reason}, {"action_added", action_added}, {"context_added", context_added}}
                 .dump());
 }
 
@@ -80,25 +85,66 @@ SlmClient::SlmClient(const std::wstring& server_exe, const std::wstring& model, 
     si.cb = sizeof(si);
     PROCESS_INFORMATION pi{};
     // No console window; the GUI parent has no standard handles to pass on.
-    if (CreateProcessW(server_exe.c_str(), cmdline.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr,
+    if (CreateProcessW(server_exe.c_str(), cmdline.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW | BELOW_NORMAL_PRIORITY_CLASS, nullptr,
                        folder.c_str(), &si, &pi)) {
         CloseHandle(pi.hThread);
         process_ = pi.hProcess;
+        worker_ = std::thread([this] { work(); });
     }
 }
 
 SlmClient::~SlmClient() {
-    if (process_) {
-        TerminateProcess(process_, 0);
-        CloseHandle(process_);
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        stop_ = true;
     }
+    wake_.notify_all();
+    if (process_) {
+        TerminateProcess(process_, 0); // an answer in flight fails at once, so the worker can finish
+    }
+    if (worker_.joinable()) worker_.join();
+    if (process_) CloseHandle(process_);
+}
+
+void SlmClient::answer_template(const nlohmann::json& command, const char* reason) const {
+    on_line_(nlohmann::json{{"ev", "description"}, {"alertId", command.value("alertId", std::string())},
+                            {"text", nullptr}, {"source", "template"}, {"reason", reason}}.dump());
 }
 
 void SlmClient::describe(const nlohmann::json& command) {
     if (!running()) {
-        on_line_(nlohmann::json{{"ev", "description"}, {"alertId", command.value("alertId", std::string())},
-                                {"text", nullptr}, {"source", "template"}}.dump());
+        answer_template(command, "model unavailable");
         return;
     }
-    std::thread(ask_model, port_, on_line_, command).detach();
+    nlohmann::json dropped;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        queue_.push_back({command, std::chrono::steady_clock::now()});
+        if (queue_.size() > kMaxQueue) {
+            dropped = queue_.front().command; // the oldest waits longest and is the least useful by now
+            queue_.pop_front();
+        }
+    }
+    wake_.notify_one();
+    if (!dropped.is_null()) answer_template(dropped, "queue full");
+}
+
+// The one summary worker: takes requests in order, never blocks the alarm path.
+void SlmClient::work() {
+    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
+    for (;;) {
+        Job job;
+        {
+            std::unique_lock<std::mutex> lock(mutex_);
+            wake_.wait(lock, [this] { return stop_ || !queue_.empty(); });
+            if (stop_) return;
+            job = std::move(queue_.front());
+            queue_.pop_front();
+        }
+        if (std::chrono::steady_clock::now() - job.queued > kMaxAge) {
+            answer_template(job.command, "waited too long");
+            continue;
+        }
+        ask_model(port_, on_line_, job.command);
+    }
 }

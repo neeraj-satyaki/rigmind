@@ -48,7 +48,7 @@ export const plainSummaryCsvRows = (list: PlainSummary[]) =>
     Source: s.source === "slm" ? "BitNet" : "Template",
   }));
 
-const SLM_WAIT_MS = 90_000;
+const SLM_WAIT_MS = 300_000; // summaries queue behind each other on the CPU
 
 /**
  * Asks the host for plain words for one alert, then calls show(text) once: the template text at once when

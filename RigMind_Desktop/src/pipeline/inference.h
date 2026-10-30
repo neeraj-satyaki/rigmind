@@ -77,6 +77,9 @@ public:
     // True when every drawn, loaded model has finished the frame(s) it was given. The live pacer releases the next frame only
     // when this holds, so each frame that is shown reaches the models and its result can be drawn on it (no stale boxes).
     bool ready_for_frame() const;
+    // The newest detection frame and, for each drawn model, its newest result (within 1 s of that frame): the input for an
+    // annotated still (alarm image evidence). Null when no frame has arrived yet.
+    std::shared_ptr<const Frame> latest_annotated(std::vector<DrawResult>& results);
     // Overlay sync since the previous call: per model, how many frames / ms older than the drawn frame the result used was
     // (0 = the frame's own result), the share of exact results, and frames drawn with no result at all.
     nlohmann::json take_sync();

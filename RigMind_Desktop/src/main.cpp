@@ -11,10 +11,12 @@
 #include <WebView2EnvironmentOptions.h>
 
 #include <chrono>
+#include <fstream>
 #include <cstdlib>
 #include <ctime>
 #include <filesystem>
 #include <functional>
+#include <condition_variable>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -25,6 +27,8 @@
 #include "backend/audit_log.h"
 #include "backend/bridge.h"
 #include "backend/event_store.h"
+#include "mcp/mcp_http.h"
+#include "mcp/mcp_server.h"
 #include "resource.h"
 #include "slm/slm_client.h"
 #include "stream/pipeline_process.h"
@@ -33,6 +37,7 @@
 // Posted by the pipeline reader thread; lParam owns a heap std::string holding one JSON line.
 constexpr UINT WM_APP_PIPE = WM_APP + 1;
 constexpr UINT WM_APP_TRAY = WM_APP + 2; // notification-area icon: mouse events
+constexpr UINT WM_APP_MCP = WM_APP + 3;  // MCP thread -> UI thread: run one bridge request (lParam owns a heap std::string)
 constexpr UINT kTrayMenuOpen = 1, kTrayMenuExit = 2;
 
 using Microsoft::WRL::Callback;
@@ -60,6 +65,13 @@ std::unique_ptr<rigmind::Bridge> g_bridge;
 std::unique_ptr<PipelineProcess> g_pipeline;
 std::unique_ptr<SlmClient> g_slm;
 std::unique_ptr<StreamRouter> g_router;
+std::unique_ptr<rigmind::McpServer> g_mcp;
+std::unique_ptr<rigmind::McpHttp> g_mcp_http;
+std::string g_mcp_url, g_mcp_token_file;
+// Latest summary answer per alert, for MCP request_summary (filled from the "description" lines).
+std::mutex g_desc_mutex;
+std::condition_variable g_desc_cv;
+std::map<std::string, nlohmann::json> g_descriptions;
 
 std::string to_utf8(const std::wstring& text) {
     if (text.empty()) return {};
@@ -173,12 +185,15 @@ bool handle_report_pdf(const std::string& text) {
     return true;
 }
 
+bool handle_mcp_message(const std::string& text); // below, with the MCP module
+
 void on_web_message(ICoreWebView2WebMessageReceivedEventArgs* args) {
     LPWSTR raw = nullptr;
     if (FAILED(args->TryGetWebMessageAsString(&raw)) || !raw) return;
     std::unique_ptr<wchar_t, decltype(&CoTaskMemFree)> message(raw, CoTaskMemFree);
 
     if (handle_report_pdf(to_utf8(message.get()))) return;
+    if (handle_mcp_message(to_utf8(message.get()))) return;
     const std::string reply = g_bridge->handle(to_utf8(message.get()));
     g_webview->PostWebMessageAsJson(to_wide(reply).c_str());
 }
@@ -269,7 +284,7 @@ void create_webview() {
 // every plain-language summary. Detections and other high-rate lines are skipped before any parsing.
 void audit_activity(const std::string& line) {
     if (!g_audit) return;
-    static const char* kKinds[] = {"\"ev\":\"status\"", "\"ev\":\"error\"", "\"ev\":\"clip\"", "\"ev\":\"evidence\"",
+    static const char* kKinds[] = {"\"ev\":\"status\"", "\"ev\":\"error\"", "\"ev\":\"clip\"", "\"ev\":\"snapshot\"", "\"ev\":\"evidence\"",
                                    "\"ev\":\"peer\"", "\"ev\":\"description\""};
     bool wanted = false;
     for (const char* k : kKinds) wanted = wanted || line.find(k) != std::string::npos;
@@ -290,6 +305,8 @@ void audit_activity(const std::string& line) {
             g_audit->record("backend", "app.error", cam, e.value("message", std::string()).substr(0, 400), now_ms());
         } else if (kind == "clip") {
             g_audit->record("backend", "evidence.saved", cam, e.value("stamp", std::string()) + " | " + std::to_string(e.value("count", 0)) + " files", now_ms());
+        } else if (kind == "snapshot") {
+            g_audit->record("backend", "evidence.snapshot", cam, e.value("stamp", std::string()) + " | " + std::to_string(e.value("count", 0)) + " images | " + e.value("state", std::string("Orange")), now_ms());
         } else if (kind == "evidence") {
             g_audit->record("backend", "evidence.started", cam, e.value("stamp", std::string()), now_ms());
         } else if (kind == "peer") {
@@ -300,7 +317,7 @@ void audit_activity(const std::string& line) {
             last[key] = state;
             g_audit->record("backend", "viewer.connection", cam, "state " + state, now_ms());
         } else if (kind == "description") {
-            g_audit->record("backend", "summary.ready", e.value("alertId", std::string()), e.value("source", std::string("template")) + (e.value("action_added", false) ? " | action added" : "") + (e.value("reason", std::string()).empty() ? "" : " | rejected: " + e.value("reason", std::string())), now_ms());
+            g_audit->record("backend", "summary.ready", e.value("alertId", std::string()), e.value("source", std::string("template")) + (e.value("action_added", false) ? " | action added" : "") + (e.value("context_added", false) ? " | camera/place added" : "") + (e.value("reason", std::string()).empty() ? "" : " | rejected: " + e.value("reason", std::string())), now_ms());
         }
     } catch (const std::exception&) {
     }
@@ -319,6 +336,18 @@ void post_line(const std::string& line) {
         return;
     }
     audit_activity(line);
+    if (line.find("\"ev\":\"description\"") != std::string::npos) {
+        try {
+            const auto e = nlohmann::json::parse(line);
+            std::lock_guard<std::mutex> lock(g_desc_mutex);
+            if (g_descriptions.size() > 64) g_descriptions.clear();
+            const std::string text = e.contains("text") && e["text"].is_string() ? e["text"].get<std::string>() : std::string(); // null = template stands
+            const std::string source = e.contains("source") && e["source"].is_string() ? e["source"].get<std::string>() : std::string("template");
+            g_descriptions[e.value("alertId", std::string())] = {{"text", text}, {"source", source}};
+            g_desc_cv.notify_all();
+        } catch (const std::exception&) {
+        }
+    }
     std::string forwarded;
     if (g_recorder && line.find("\"alarm\"") != std::string::npos) {
         try {
@@ -347,10 +376,12 @@ void post_line(const std::string& line) {
 void record_clip_line(const std::string& line) {
     try {
         const auto event = nlohmann::json::parse(line);
-        if (!event.is_object() || event.value("ev", std::string()) != "clip") return;
+        const std::string kind = event.is_object() ? event.value("ev", std::string()) : std::string();
+        if (kind != "clip" && kind != "snapshot") return; // clip = Red video set, snapshot = Orange image set
         const nlohmann::json request = {{"id", 0},
                                         {"method", "footage.record"},
-                                        {"params", {{"cam", event.at("cam")}, {"stamp", event.at("stamp")}, {"count", event.at("count")}}}};
+                                        {"params", {{"cam", event.at("cam")}, {"stamp", event.at("stamp")}, {"count", event.at("count")},
+                                                    {"kind", kind == "snapshot" ? "image" : "video"}}}};
         g_bridge->handle(request.dump());
     } catch (const std::exception&) {
         // Malformed clip line: the page still receives it; no footage row.
@@ -384,6 +415,108 @@ void open_saved_cameras() {
     } catch (const std::exception&) {
         // A malformed record is left for the Camera page to overwrite.
     }
+}
+
+// ---- MCP module (local HTTP endpoint for alerts, evidence, reports and the live scene) ------------------------------------
+
+std::filesystem::path documents_reports_dir() {
+    PWSTR documents = nullptr;
+    std::filesystem::path dir;
+    if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_Documents, 0, nullptr, &documents)) && documents) dir = std::filesystem::path(documents) / L"RigMind Reports";
+    if (documents) CoTaskMemFree(documents);
+    return dir;
+}
+
+// Called on an MCP worker thread. The bridge is UI-thread only, so the request is posted to the window; the model's answer
+// comes back through the "description" lines (post_line) and is waited for here.
+nlohmann::json mcp_request_summary(const nlohmann::json& alert, int timeout_ms) {
+    if (!g_slm) return {{"text", "BitNet is not installed on this PC, so no model summary can be written."}, {"source", "unavailable"}};
+    const std::string id = alert.value("alertId", std::string());
+    {
+        std::lock_guard<std::mutex> lock(g_desc_mutex);
+        g_descriptions.erase(id);
+    }
+    const nlohmann::json request = {{"id", 0}, {"method", "event.describe"},
+                                    {"params", {{"alertId", id}, {"severity", alert.value("severity", std::string())}, {"condition", alert.value("condition", std::string())},
+                                                {"place", alert.value("place", std::string())}, {"camId", alert.value("camId", std::string())},
+                                                {"tsMs", now_ms()}, {"sceneTs", alert.value("sceneTs", std::int64_t{0})}}}};
+    auto* message = new std::string(request.dump());
+    if (!g_hwnd || !PostMessageW(g_hwnd, WM_APP_MCP, 0, reinterpret_cast<LPARAM>(message))) {
+        delete message;
+        return nullptr;
+    }
+    std::unique_lock<std::mutex> lock(g_desc_mutex);
+    if (!g_desc_cv.wait_for(lock, std::chrono::milliseconds(timeout_ms), [&] { return g_descriptions.count(id) > 0; })) return nullptr;
+    nlohmann::json answer = g_descriptions[id];
+    if (answer.value("text", std::string()).empty()) answer["text"] = "No model sentence was accepted; the standard text stands.";
+    return answer;
+}
+
+// Enabled unless the record mcp.enabled is false. The token never leaves the token file; the page only learns where it is.
+void start_mcp(const std::filesystem::path& db_path) {
+    try {
+        const auto enabled = g_store->get_record("mcp.enabled");
+        if (enabled && *enabled == "false") {
+            g_audit->record("backend", "mcp.start", "", "disabled", now_ms());
+            return;
+        }
+        const auto token_file = user_data_dir() / L"mcp-token.txt";
+        const std::string token = rigmind::load_or_create_mcp_token(token_file);
+        if (token.empty()) {
+            g_audit->record("backend", "mcp.start", "", "no token could be created", now_ms());
+            return;
+        }
+        rigmind::McpHooks hooks;
+        hooks.footage_root = user_data_dir() / L"footage";
+        hooks.reports_dir = documents_reports_dir();
+        hooks.scene = [](const std::string& cam) { return g_router ? g_router->scene(cam) : nlohmann::json(nullptr); };
+        hooks.scene_cameras = [] { return g_router ? g_router->scene_cameras() : std::vector<std::string>{}; };
+        hooks.request_summary = mcp_request_summary;
+        hooks.audit = [](const std::string& tool, const std::string& detail) {
+            if (g_audit) g_audit->record("mcp", "mcp.call", tool, detail, now_ms());
+        };
+        g_mcp = std::make_unique<rigmind::McpServer>(to_utf8(db_path.wstring()), hooks);
+        g_mcp_http = std::make_unique<rigmind::McpHttp>(*g_mcp, token);
+        if (!g_mcp_http->start(8792)) {
+            g_mcp_http.reset();
+            g_mcp.reset();
+            g_audit->record("backend", "mcp.start", "", "no free port", now_ms());
+            return;
+        }
+        g_mcp_url = "http://127.0.0.1:" + std::to_string(g_mcp_http->port()) + "/mcp";
+        g_mcp_token_file = to_utf8(token_file.wstring());
+        const nlohmann::json info = {{"url", g_mcp_url}, {"tokenFile", g_mcp_token_file}, {"auth", "Authorization: Bearer <token>"}};
+        std::ofstream(user_data_dir() / L"mcp-endpoint.json") << info.dump(2);
+        g_audit->record("backend", "mcp.start", "", g_mcp_url, now_ms());
+    } catch (const std::exception& e) {
+        g_mcp_http.reset();
+        g_mcp.reset();
+        if (g_audit) g_audit->record("backend", "mcp.start", "", std::string("failed: ") + e.what(), now_ms());
+    }
+}
+
+// mcp.status / mcp.set from the Integrations page. Handled here (not in the bridge) because the endpoint belongs to the host.
+bool handle_mcp_message(const std::string& text) {
+    if (text.find("\"mcp.") == std::string::npos) return false;
+    nlohmann::json request;
+    try {
+        request = nlohmann::json::parse(text);
+    } catch (const std::exception&) {
+        return false;
+    }
+    const std::string method = request.is_object() ? request.value("method", std::string()) : std::string();
+    if (method != "mcp.status" && method != "mcp.set") return false;
+    nlohmann::json result;
+    if (method == "mcp.set" && request.contains("params") && request["params"].is_object() && request["params"].contains("enabled") && request["params"]["enabled"].is_boolean()) {
+        const bool on = request["params"]["enabled"].get<bool>();
+        g_store->put_record("mcp.enabled", on ? "true" : "false");
+        g_audit->record("ui", "mcp.set", "", on ? "enabled (applies at the next start)" : "disabled (applies at the next start)", now_ms());
+    }
+    const auto enabled = g_store->get_record("mcp.enabled");
+    result = {{"running", g_mcp_http != nullptr}, {"url", g_mcp_url}, {"tokenFile", g_mcp_token_file},
+              {"enabled", !(enabled && *enabled == "false")}, {"tools", 10}};
+    g_webview->PostWebMessageAsJson(to_wide(nlohmann::json{{"id", request.value("id", 0)}, {"ok", true}, {"result", result}}.dump()).c_str());
+    return true;
 }
 
 void init_backend() {
@@ -420,6 +553,7 @@ void init_backend() {
     }
     g_router = std::make_unique<StreamRouter>(g_pipeline.get(), g_slm.get(), post_line);
     g_bridge = std::make_unique<rigmind::Bridge>(*g_store, g_router.get(), g_audit.get());
+    start_mcp(db_path);
 }
 
 // ---- One session per user data folder ----------------------------------------------------------------------------------
@@ -556,9 +690,14 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam) 
     case WM_APP_PIPE: {
         std::unique_ptr<std::string> line(reinterpret_cast<std::string*>(lparam));
         // A finished alarm clip becomes a footage row. This runs on the UI thread, where the bridge may be called.
-        if (g_bridge && line->find("\"clip\"") != std::string::npos) record_clip_line(*line);
+        if (g_bridge && (line->find("\"clip\"") != std::string::npos || line->find("\"snapshot\"") != std::string::npos)) record_clip_line(*line);
         notify_from_line(*line);
         if (g_webview) g_webview->PostWebMessageAsJson(to_wide(*line).c_str());
+        return 0;
+    }
+    case WM_APP_MCP: {
+        std::unique_ptr<std::string> request(reinterpret_cast<std::string*>(lparam));
+        if (g_bridge) g_bridge->handle(*request); // an MCP summary request: audited like the "Plain words" button
         return 0;
     }
     case WM_APP_TRAY:
@@ -623,6 +762,8 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, LPWSTR, int show) {
     g_controller = nullptr;
     g_env = nullptr;
     if (g_audit) g_audit->record("backend", "app.stop", "", "windows-host", now_ms());
+    g_mcp_http.reset(); // stops the endpoint before the data it reads goes away
+    g_mcp.reset();
     g_bridge.reset();
     g_router.reset();
     g_slm.reset();

@@ -29,6 +29,7 @@ import {
   th,
 } from "./ui";
 import { Check, NoteDialog } from "./workflow";
+import { McpCard } from "./McpCard";
 import { useCameras } from "@/lib/camera-status";
 import { isNative, nativeCall } from "@/lib/native-bridge";
 import { cameraHealthRows, summarizeCameras } from "@/lib/live-analytics";
@@ -491,7 +492,12 @@ function LicenseCapacityDemo() {
 }
 
 export function Integrations() {
-  return demoDataEnabled() ? <IntegrationsDemo /> : <IntegrationsReal />;
+  return (
+    <>
+      {demoDataEnabled() ? <IntegrationsDemo /> : <IntegrationsReal />}
+      <McpCard />
+    </>
+  );
 }
 
 function IntegrationsDemo() {

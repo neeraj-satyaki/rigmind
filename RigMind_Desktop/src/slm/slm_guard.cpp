@@ -135,4 +135,31 @@ std::string reject_reason(const std::string& sentence, const nlohmann::json& eve
     return {};
 }
 
+std::string with_context(const std::string& sentence, const nlohmann::json& event) {
+    const std::string reason = reject_reason(sentence, event);
+    if (reason != "missing camera" && reason != "missing place") return sentence;
+    const std::string camera = event.value("camId", std::string());
+    const std::string place = event.value("place", std::string());
+    std::string head;
+    const std::string text = lower(sentence);
+    if (!camera.empty() && text.find(lower(camera)) == std::string::npos) head = "Camera " + camera;
+    // Place: any part of "Rig · Area" already named counts, as in reject_reason; otherwise the whole place goes in.
+    bool place_named = place.empty();
+    std::size_t from = 0;
+    const std::string dot = "\xC2\xB7"; // U+00B7
+    while (!place_named) {
+        const auto at = place.find(dot, from);
+        const std::string part = trim(place.substr(from, at == std::string::npos ? std::string::npos : at - from));
+        if (!part.empty() && text.find(lower(part)) != std::string::npos) place_named = true;
+        if (at == std::string::npos) break;
+        from = at + dot.size();
+    }
+    if (!place_named) head += (head.empty() ? "" : ", ") + place;
+    if (head.empty()) return sentence;
+    std::string body = trim(sentence);
+    // "At 30 Oct ..." / "The ..." read fine after the colon in lower case; keep names and acronyms as they are.
+    if (body.size() > 1 && std::isupper(static_cast<unsigned char>(body[0])) && std::islower(static_cast<unsigned char>(body[1]))) body[0] = static_cast<char>(std::tolower(static_cast<unsigned char>(body[0])));
+    return head + ": " + body;
+}
+
 } // namespace rigmind

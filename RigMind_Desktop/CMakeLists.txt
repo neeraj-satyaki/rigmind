@@ -12,6 +12,7 @@ add_library(rigmind_backend STATIC
     src/backend/audit_log.cpp
     src/backend/alarm_recorder.cpp
     src/slm/slm_guard.cpp
+    src/mcp/mcp_server.cpp
     third_party/sqlite3/sqlite3.c)
 target_include_directories(rigmind_backend PUBLIC
     ${CMAKE_SOURCE_DIR}/src
@@ -114,10 +115,18 @@ target_include_directories(scene_test PRIVATE ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(scene_test PRIVATE rigmind_backend)
 add_test(NAME scene COMMAND scene_test)
 
+# MCP module: protocol, tools, resources and the local HTTP transport.
+if(WIN32)
+    add_executable(mcp_test tests/mcp_test.cpp src/mcp/mcp_http.cpp)
+    target_include_directories(mcp_test PRIVATE ${CMAKE_SOURCE_DIR}/src)
+    target_link_libraries(mcp_test PRIVATE rigmind_backend ws2_32 bcrypt)
+    add_test(NAME mcp COMMAND mcp_test)
+endif()
+
 if(WIN32)
     set(WEBVIEW2_DIR ${CMAKE_SOURCE_DIR}/third_party/webview2/build/native)
 
-    add_executable(RigMind WIN32 src/main.cpp src/stream/pipeline_process.cpp src/slm/slm_client.cpp resources/app.rc)
+    add_executable(RigMind WIN32 src/main.cpp src/stream/pipeline_process.cpp src/slm/slm_client.cpp src/mcp/mcp_http.cpp resources/app.rc)
     target_include_directories(RigMind PRIVATE ${CMAKE_SOURCE_DIR}/resources ${WEBVIEW2_DIR}/include)
     target_link_libraries(RigMind PRIVATE
         rigmind_backend

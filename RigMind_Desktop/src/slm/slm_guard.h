@@ -20,6 +20,10 @@ bool has_action(const std::string& sentence);
 // PPE." A sentence that already has an action is returned unchanged. `added` (optional) reports whether text was appended.
 std::string with_action(const std::string& sentence, const std::string& severity, bool* added = nullptr);
 
+// A sentence that only lacks the camera name or the place gets them in front ("Camera CAM-01, Demo rig 01: ..."); the model's
+// own words stay. Returns the sentence unchanged when nothing is missing.
+std::string with_context(const std::string& sentence, const nlohmann::json& event);
+
 // Empty string when the sentence is acceptable for this event, else the rejection reason.
 std::string reject_reason(const std::string& sentence, const nlohmann::json& event);
 

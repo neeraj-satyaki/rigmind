@@ -70,9 +70,11 @@ public:
     nlohmann::json recent_audit(const std::string& action, int limit) const;
 
     // Alarm footage: one row per saved clip set. Rows and their files expire after 7 days.
-    void record_footage(const std::string& cam_id, std::int64_t timestamp_ms, int clip_count, const std::string& path);
-    nlohmann::json list_footage(int limit) const;
-    // Clip folder for playback: {"dir": full folder path, "files": [.mp4 names]}. Path is <cam_id>/<stamp>, validated.
+    // kind: "video" (Red clip set, .mp4 segments) or "image" (Orange snapshot set, orange-N.jpg). clip_count is the file count.
+    void record_footage(const std::string& cam_id, std::int64_t timestamp_ms, int clip_count, const std::string& path,
+                        const std::string& kind = "video");
+    nlohmann::json list_footage(int limit) const; // rows carry "kind"; rows written before the column existed are "video"
+    // Folder for playback: {"dir", "files": [.mp4 names], "images": [.jpg names], "kind"}. Path is <cam_id>/<stamp>, validated.
     nlohmann::json list_footage_files(const std::string& path) const;
     // Deletes expired rows and their clip folders. Returns the number of rows removed.
     int prune_footage(std::int64_t now_ms);

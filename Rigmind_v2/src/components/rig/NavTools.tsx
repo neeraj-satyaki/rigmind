@@ -5,7 +5,7 @@ import { useEffect, useRef, useState } from "react";
 import { Link, useNavigate } from "@tanstack/react-router";
 import { Bell, Search, Moon, Sun, LogOut, UserRound, CheckCheck } from "lucide-react";
 import { toast } from "sonner";
-import { alertColors, alertToastText } from "@/lib/alert-colors";
+import { alertColors, alertToastOptions, alertToastText } from "@/lib/alert-colors";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Btn, Chip, Avatar, Row, Mono } from "./ui";
 import { Prompt } from "./workflow";
@@ -188,14 +188,12 @@ export function Notifications() {
           );
           setUnread((u) => (u ?? itemCount.current) + 1);
           const text = alertToastText(a);
-          const colors = alertColors(a.severity);
           // Coloured by level (Yellow / Orange / Red); toasts stack one above the other and stay until dismissed or replaced.
           toast(text.title, {
             id: a.id,
             description: text.description,
             duration: a.severity === "Critical" ? 30_000 : 15_000,
-            style: { background: colors.background, color: colors.color, border: `1px solid ${colors.borderColor}` },
-            descriptionClassName: "!text-inherit opacity-90",
+            ...alertToastOptions(a.severity),
           });
           playAlertSound(a.severity);
         }, LOGO_ALERT_MS),

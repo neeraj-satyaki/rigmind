@@ -31,7 +31,7 @@ vi.mock("@tanstack/react-router", () => ({
 import { Notifications } from "@/components/rig/NavTools";
 import { handlePpeEvent, resetPpeAlerts, startPpeAlerts } from "@/lib/ppe-alerts";
 import { LOGO_ALERT_MS } from "@/lib/alert-bus";
-import { alertColors } from "@/lib/alert-colors";
+import { alertToastOptions } from "@/lib/alert-colors";
 import * as store from "@/lib/detections";
 
 const send = (state: string, missing: string[], extra: Record<string, unknown> = {}) =>
@@ -68,8 +68,11 @@ describe("PPE compliance events -> alerts", () => {
     expect(h.toasts[0]!.title).toContain("Advisory");
     expect(h.toasts[0]!.opts.description).toContain("PPE not detected: vest");
     expect(h.toasts[0]!.opts.description).not.toMatch(/not worn/i);
-    const yellow = alertColors("Advisory");
-    expect(h.toasts[0]!.opts.style).toMatchObject({ background: yellow.background, color: yellow.color });
+    // theme-coloured, slightly blurred toast with thick yellow text
+    const glass = alertToastOptions("Advisory").style;
+    expect(h.toasts[0]!.opts.style).toMatchObject({ color: glass.color, backdropFilter: expect.stringContaining("blur") });
+    expect(String((h.toasts[0]!.opts.style as { background: string }).background)).toContain("var(--popover)");
+    expect(glass.color).toBe("var(--toast-yellow)");
     expect(h.tones).toHaveLength(0); // quiet
     expect(h.calls.filter((c) => c.method === "alert.raise")).toHaveLength(0); // the host stored the row
     expect(text()).toContain("PPE-CAM-01-b11");

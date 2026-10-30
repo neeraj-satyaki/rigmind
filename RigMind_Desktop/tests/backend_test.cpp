@@ -14,6 +14,7 @@
 #include "backend/bridge.h"
 #include "slm/slm_guard.h"
 #include "backend/event_store.h"
+#include "pipeline/snapshot_plan.h"
 #include "sqlite3.h"
 
 using rigmind::AlarmState;
@@ -338,6 +339,57 @@ static void test_footage_retention() {
     std::filesystem::remove_all(root);
 }
 
+static void test_footage_images_and_migration() {
+    const auto tmp = std::filesystem::temp_directory_path();
+    const auto root = tmp / "rigmind-footage-img-test";
+    const auto dbfile = tmp / "rigmind-footage-old.db";
+    std::filesystem::remove_all(root);
+    std::filesystem::remove(dbfile);
+    const std::int64_t ts = 1000000000000LL;
+    // A database from before image evidence: footage without the kind column holds one video row.
+    {
+        sqlite3* db = nullptr;
+        CHECK(sqlite3_open(dbfile.string().c_str(), &db) == SQLITE_OK);
+        CHECK(sqlite3_exec(db, "CREATE TABLE footage (id INTEGER PRIMARY KEY AUTOINCREMENT, cam_id TEXT NOT NULL, ts_ms INTEGER NOT NULL, clip_count INTEGER NOT NULL, path TEXT NOT NULL, expires_ms INTEGER NOT NULL);"
+                               "INSERT INTO footage (cam_id, ts_ms, clip_count, path, expires_ms) VALUES ('CAM-01', 1000000000000, 2, 'CAM-01/1000000000000', 9999999999999);",
+                           nullptr, nullptr, nullptr) == SQLITE_OK);
+        sqlite3_close(db);
+    }
+    {
+        rigmind::EventStore store(dbfile.string());
+        store.set_footage_root(root.string());
+        const auto old_rows = store.list_footage(10);
+        CHECK(old_rows.size() == 1 && old_rows[0]["kind"] == "video");
+        const std::int64_t img_ts = ts + 5000;
+        const auto dir = root / "CAM-01" / std::to_string(img_ts);
+        std::filesystem::create_directories(dir);
+        for (const char* n : {"orange-1.jpg", "orange-2.jpg", "orange-3.jpg"}) std::ofstream(dir / n) << "x";
+        store.record_footage("CAM-01", img_ts, 3, "CAM-01/" + std::to_string(img_ts), "image");
+        bool bad_kind = false;
+        try { store.record_footage("CAM-01", img_ts + 1, 1, "CAM-01/" + std::to_string(img_ts + 1), "audio"); } catch (const std::runtime_error&) { bad_kind = true; }
+        CHECK(bad_kind);
+        const auto rows = store.list_footage(10);
+        CHECK(rows.size() == 2 && rows[0]["kind"] == "image" && rows[0]["clipCount"] == 3 && rows[1]["kind"] == "video");
+        const auto files = store.list_footage_files("CAM-01/" + std::to_string(img_ts));
+        CHECK(files["kind"] == "image" && files["images"].size() == 3 && files["images"][0] == "orange-1.jpg" && files["files"].empty());
+        // Same 7-day retention: the image set and its folder expire with the rows.
+        CHECK(store.prune_footage(img_ts + 8LL * 24 * 60 * 60 * 1000) == 1);
+        CHECK(!std::filesystem::exists(dir));
+    }
+    // Opening the migrated database again is harmless.
+    { rigmind::EventStore again(dbfile.string()); CHECK(again.list_footage(10).size() >= 1); }
+    std::filesystem::remove_all(root);
+    std::filesystem::remove(dbfile);
+}
+
+static void test_snapshot_plan() {
+    using namespace rigmind;
+    CHECK(snapshots_due(0) == 1 && snapshots_due(2999) == 1 && snapshots_due(3000) == 2 && snapshots_due(5999) == 2 && snapshots_due(6000) == 3);
+    CHECK(snapshot_file_name(2) == "orange-2.jpg");
+    CHECK(!snapshot_set_complete(1, 3000) && !snapshot_set_complete(2, 6400) && snapshot_set_complete(2, 6501) && snapshot_set_complete(3, 6000));
+    CHECK(snapshot_set_allowed(0, 100) && !snapshot_set_allowed(1000, 5000) && snapshot_set_allowed(1000, 21000));
+}
+
 static void test_slm_guard() {
     CHECK(rigmind::first_sentence("1: 28 Oct 2026 21:28, camera cam-03 recorded: Elevator. Extra.") ==
           "28 Oct 2026 21:28, camera cam-03 recorded: Elevator.");
@@ -354,6 +406,12 @@ static void test_slm_guard() {
         CHECK(rigmind::with_action("Camera CAM-01 saw a collision; stop the work and check the area.", "Critical", &added) ==
                   "Camera CAM-01 saw a collision; stop the work and check the area." && !added);
         CHECK(rigmind::with_action("", "Critical", &added).empty() && !added);
+        const nlohmann::json ev = {{"camId", "CAM-01"}, {"place", "Demo rig 01 · Derrick board"}};
+        const std::string fixed = rigmind::with_context("At 30 Oct 2026 14:29, an elevator is near the platform.", ev);
+        CHECK(fixed.find("Camera CAM-01, ") == 0 && fixed.find(": at 30 Oct 2026") != std::string::npos);
+        CHECK(rigmind::reject_reason(fixed, ev).empty());
+        CHECK(rigmind::with_context("Camera CAM-01 at Derrick board saw a collision.", ev) == "Camera CAM-01 at Derrick board saw a collision.");
+        CHECK(rigmind::with_context("Elevator near Derrick board.", ev).find("Camera CAM-01") == 0);
         CHECK(rigmind::first_sentences("One thing happened. Check the area. Third one.", 2) == "One thing happened. Check the area.");
     }
 
@@ -646,6 +704,8 @@ int main() {
     test_alarm_events_migration();
     test_slm_guard();
     test_footage_retention();
+    test_footage_images_and_migration();
+    test_snapshot_plan();
     test_audit_trail();
     test_describe_source();
     test_zoom_thresholds();

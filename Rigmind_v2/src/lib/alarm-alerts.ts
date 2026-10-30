@@ -1,5 +1,5 @@
 import { toast } from "sonner";
-import { alertColors } from "@/lib/alert-colors";
+import { alertToastOptions } from "@/lib/alert-colors";
 import { raiseAlert, updateAlert, type AlertPhase, type RaisedAlert } from "./alert-bus";
 import { isNative, onNativeEvent, type NativeEvent } from "./native-bridge";
 import { describeAlert } from "./plain-summary";
@@ -72,12 +72,10 @@ function closeCycle(cam: string, closed: Record<string, unknown>, place: string,
     place,
     phase: "Cleared",
   };
-  const colors = alertColors(severity);
   describeAlert(alert, cam, place, (text) =>
     toast(`${id} cycle summary`, {
       description: text,
-      style: { background: colors.background, color: colors.color, border: `1px solid ${colors.borderColor}` },
-      descriptionClassName: "!text-inherit opacity-90",
+      ...alertToastOptions(severity),
     }),
   ).catch(() => {});
 }
@@ -125,12 +123,10 @@ export function handleAlarmEvent(msg: NativeEvent): RaisedAlert | undefined {
   raiseAlert(alert, { persist: false }); // the host already stored the row; this is toast + bell + tone
   if (state === "Red") {
     if (!isNative()) osNotify(alert); // inside the desktop app the host raises the Windows notification from the tray icon
-    const colors = alertColors(alert.severity);
     describeAlert(alert, msg.cam, alert.place, (text) =>
       toast(`${alert.id} in plain words`, {
         description: text,
-        style: { background: colors.background, color: colors.color, border: `1px solid ${colors.borderColor}` },
-        descriptionClassName: "!text-inherit opacity-90",
+        ...alertToastOptions(alert.severity),
       }),
     ).catch(() => {});
   }

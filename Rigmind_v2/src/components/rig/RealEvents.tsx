@@ -244,7 +244,7 @@ export function RealEventInvestigation({ eventId }: { eventId: string }) {
           <Card>
             <CardHead title="Evidence" />
             <div className="space-y-2 p-4 text-sm text-muted-foreground">
-              Saved clips for critical events are listed in the Evidence library.
+              Orange events save images and Red events save a video clip. Both are listed in the Evidence library.
               <div>
                 <Link to="/evidence">
                   <Btn>Open evidence library</Btn>

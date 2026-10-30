@@ -7,6 +7,7 @@
 #include <map>
 #include <mutex>
 #include <string>
+#include <vector>
 
 #include <nlohmann/json.hpp>
 
@@ -27,6 +28,19 @@ public:
     void note_scene(const nlohmann::json& scene) {
         std::lock_guard<std::mutex> lock(scene_mutex_);
         scenes_[scene.value("cam", std::string())] = scene;
+    }
+
+    // For the MCP module: the latest scene of a camera ("" = the only/any camera), and the cameras that have one.
+    nlohmann::json scene(const std::string& cam) {
+        std::lock_guard<std::mutex> lock(scene_mutex_);
+        const auto it = cam.empty() ? scenes_.begin() : scenes_.find(cam);
+        return it == scenes_.end() ? nlohmann::json(nullptr) : it->second;
+    }
+    std::vector<std::string> scene_cameras() {
+        std::lock_guard<std::mutex> lock(scene_mutex_);
+        std::vector<std::string> out;
+        for (const auto& [cam, scene] : scenes_) out.push_back(cam);
+        return out;
     }
 
     void send(const nlohmann::json& command) override {

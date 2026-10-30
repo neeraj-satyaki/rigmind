@@ -11,7 +11,7 @@ import { cameraHealthRows, summarizeCameras } from "@/lib/live-analytics";
 import { localOperator, useRealCameras, useStreamSources } from "@/lib/real-state";
 import { RULES_KEY, loadAuditEntries, recordChange, stamp, useRecord, type RuleDraft } from "@/lib/real-data";
 
-type Footage = { id: number; camId: string; timestampMs: number; clipCount: number; expiresMs: number };
+type Footage = { id: number; camId: string; timestampMs: number; clipCount: number; expiresMs: number; kind?: "video" | "image" };
 
 export function SystemHealthReal() {
   const status = useCameras();
@@ -70,9 +70,9 @@ export function SystemHealthReal() {
         <Kpi label="Average frame rate" value={sum.online ? sum.avgFps.toFixed(1) : "—"} note={sum.online ? `${Math.round(sum.totalKbps)} kbps total` : "No stream online"} />
         <Kpi label="Reconnects" value={String(sum.reconnects)} note="Since the app started" />
         <Kpi
-          label="Saved alarm footage"
+          label="Saved alarm evidence"
           value={footage ? String(footage.length) : "—"}
-          note={footage ? `${footage.reduce((a, f) => a + f.clipCount, 0)} clips` : isNative() ? "Not available" : "Desktop app only"}
+          note={footage ? `${footage.filter((f) => f.kind !== "image").reduce((a, f) => a + f.clipCount, 0)} clips, ${footage.filter((f) => f.kind === "image").reduce((a, f) => a + f.clipCount, 0)} images` : isNative() ? "Not available" : "Desktop app only"}
         />
       </div>
       <div className="grid gap-4 xl:grid-cols-[1.7fr_1fr]">

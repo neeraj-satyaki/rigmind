@@ -15,6 +15,7 @@ import {
   pageHead,
 } from "@/components/rig/ui";
 import { Loader } from "@/components/rig/Loader";
+import { StreamVideo } from "@/components/rig/StreamVideo";
 import { PasswordInput } from "@/components/rig/PasswordInput";
 import { readDevice, writeDevice } from "@/lib/device-db";
 import { toast } from "sonner";
@@ -49,7 +50,8 @@ function NewCamera() {
     [secret, setSecret] = useState(""),
     [rig, setRig] = useState(demo ? "Demo rig 01" : "This rig"),
     [area, setArea] = useState(demo ? "Derrick board" : "Camera stream"),
-    [problem, setProblem] = useState("");
+    [problem, setProblem] = useState(""),
+    [previewUri, setPreviewUri] = useState(""); // the stream being validated: shown live in the right-hand panel
   const live = useCamera(cameraId);
   const checked = useRef({ current: "connecting" as string, reason: "" }).current;
   checked.current = live?.state ?? "connecting";
@@ -76,8 +78,11 @@ function NewCamera() {
     setBusy(true);
     setProblem("");
     setValid(false);
+    setPreviewUri(""); // a fresh viewer for every validation
     try {
-      await nativeCall("stream.open", { cam: cameraId, uri: withCredentials(uri, user, secret) });
+      const target = withCredentials(uri, user, secret);
+      await nativeCall("stream.open", { cam: cameraId, uri: target });
+      setPreviewUri(target);
       const end = Date.now() + 20_000;
       while (Date.now() < end) {
         await new Promise((r) => setTimeout(r, 500));
@@ -87,10 +92,12 @@ function NewCamera() {
         setValid(true);
         toast.success("Stream is online");
       } else {
+        setPreviewUri("");
         setProblem(checked.reason || "The camera did not answer within 20 seconds. Check the address, the network and the login.");
         toast.error("Stream could not be validated", { description: checked.reason || undefined });
       }
     } catch (e) {
+      setPreviewUri("");
       setProblem(String(e));
       toast.error("Stream could not be opened", { description: String(e) });
     } finally {
@@ -281,7 +288,9 @@ function NewCamera() {
           </div>
         </Card>
         <div className="space-y-4">
-          <CameraTile id={cameraId} area={area} overlay={demo && step === 2} />
+          <CameraTile id={cameraId} area={area} overlay={demo && step === 2 && !previewUri} live={!!previewUri}>
+            {previewUri && <StreamVideo camId={cameraId} uri={previewUri} />}
+          </CameraTile>
           <Card>
             <CardHead title="Validation results" />
             <div className="p-4">

@@ -635,6 +635,25 @@ std::vector<DrawResult> Inference::collect(std::int64_t key, std::chrono::millis
     return out;
 }
 
+std::shared_ptr<const Frame> Inference::latest_annotated(std::vector<DrawResult>& results) {
+    std::shared_ptr<const Frame> frame;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        frame = latest_;
+    }
+    results.clear();
+    if (!frame) return nullptr;
+    const bool wanted[2] = {overlay_ppe_.load(), overlay_idss_.load()};
+    std::lock_guard<std::mutex> lock(draw_mutex_);
+    for (int m = 0; m < 2; ++m) {
+        if (!wanted[m] || history_[m].empty()) continue;
+        const DrawResult& newest = history_[m].back();
+        const std::int64_t gap = frame->pts_key >= 0 ? frame->pts_key - newest.key : 0;
+        if (gap < 1000000000LL && gap > -1000000000LL) results.push_back(newest); // within a second of the frame
+    }
+    return frame;
+}
+
 std::vector<ModelStats> Inference::take_stats() {
     std::vector<ModelStats> out;
     const auto now = std::chrono::steady_clock::now();

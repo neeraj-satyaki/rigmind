@@ -71,6 +71,11 @@ void migrate_alarm_events(sqlite3* db) {
     }
 }
 
+// Footage rows written before image evidence have no kind: they are video clip sets.
+void migrate_footage(sqlite3* db) {
+    if (!has_column(db, "footage", "kind")) exec_or_throw(db, "ALTER TABLE footage ADD COLUMN kind TEXT NOT NULL DEFAULT 'video'");
+}
+
 } // namespace
 
 EventStore::EventStore(const std::string& path) {
@@ -116,6 +121,7 @@ EventStore::EventStore(const std::string& path) {
                   " key TEXT PRIMARY KEY,"
                   " value TEXT NOT NULL);");
     migrate_alarm_events(db_);
+    migrate_footage(db_);
 }
 
 EventStore::~EventStore() {
@@ -393,23 +399,24 @@ void EventStore::set_footage_root(const std::string& root) {
 }
 
 void EventStore::record_footage(const std::string& cam_id, std::int64_t timestamp_ms, int clip_count,
-                                const std::string& path) {
+                                const std::string& path, const std::string& kind) {
     const std::string stamp = std::to_string(timestamp_ms);
-    if (!safe_cam_id(cam_id) || !safe_stamp(stamp) || path != cam_id + "/" + stamp)
+    if (!safe_cam_id(cam_id) || !safe_stamp(stamp) || path != cam_id + "/" + stamp || (kind != "video" && kind != "image"))
         throw std::runtime_error("invalid footage record");
-    run(db_, "INSERT INTO footage (cam_id, ts_ms, clip_count, path, expires_ms) VALUES (?, ?, ?, ?, ?)",
+    run(db_, "INSERT INTO footage (cam_id, ts_ms, clip_count, path, expires_ms, kind) VALUES (?, ?, ?, ?, ?, ?)",
         [&](sqlite3_stmt* s) {
             sqlite3_bind_text(s, 1, cam_id.c_str(), -1, SQLITE_TRANSIENT);
             sqlite3_bind_int64(s, 2, timestamp_ms);
             sqlite3_bind_int(s, 3, clip_count);
             sqlite3_bind_text(s, 4, path.c_str(), -1, SQLITE_TRANSIENT);
             sqlite3_bind_int64(s, 5, timestamp_ms + kFootageRetentionMs);
+            sqlite3_bind_text(s, 6, kind.c_str(), -1, SQLITE_TRANSIENT);
         });
 }
 
 nlohmann::json EventStore::list_footage(int limit) const {
     sqlite3_stmt* stmt = nullptr;
-    const char* sql = "SELECT id, cam_id, ts_ms, clip_count, path, expires_ms FROM footage ORDER BY ts_ms DESC, id DESC LIMIT ?";
+    const char* sql = "SELECT id, cam_id, ts_ms, clip_count, path, expires_ms, kind FROM footage ORDER BY ts_ms DESC, id DESC LIMIT ?";
     if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) != SQLITE_OK) throw std::runtime_error(sqlite3_errmsg(db_));
     sqlite3_bind_int(stmt, 1, limit);
     nlohmann::json rows = nlohmann::json::array();
@@ -421,6 +428,7 @@ nlohmann::json EventStore::list_footage(int limit) const {
             {"clipCount", sqlite3_column_int(stmt, 3)},
             {"path", column_text(stmt, 4)},
             {"expiresMs", sqlite3_column_int64(stmt, 5)},
+            {"kind", column_text(stmt, 6)},
         });
     }
     sqlite3_finalize(stmt);
@@ -433,13 +441,15 @@ nlohmann::json EventStore::list_footage_files(const std::string& path) const {
         !safe_stamp(path.substr(slash + 1)))
         throw std::runtime_error("invalid footage path");
     const std::filesystem::path dir = std::filesystem::path(footage_root_) / path;
-    std::vector<std::string> files;
+    std::vector<std::string> files, images;
     std::error_code ec;
     for (const auto& entry : std::filesystem::directory_iterator(dir, ec)) {
         if (entry.path().extension() == ".mp4") files.push_back(entry.path().filename().string());
+        else if (entry.path().extension() == ".jpg") images.push_back(entry.path().filename().string());
     }
     std::sort(files.begin(), files.end());
-    return {{"dir", dir.string()}, {"files", files}};
+    std::sort(images.begin(), images.end());
+    return {{"dir", dir.string()}, {"files", files}, {"images", images}, {"kind", (images.empty() || !files.empty()) ? "video" : "image"}};
 }
 
 int EventStore::prune_footage(std::int64_t now) {

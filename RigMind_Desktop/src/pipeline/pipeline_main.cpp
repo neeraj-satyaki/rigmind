@@ -49,7 +49,10 @@
 #include <set>
 #include "pipeline/inference.h"
 #include "pipeline/overlay_draw.h"
+#include "pipeline/snapshot_plan.h"
 #include <opencv2/core.hpp>
+#include <opencv2/imgcodecs.hpp>
+#include <opencv2/imgproc.hpp>
 #include "pipeline/plugins/ews/rigmind_facts_meta.h"
 #include <mutex>
 #include <string>
@@ -125,6 +128,12 @@ struct Camera {
     gint64 red_wall_ms = 0;               // wall clock of the Red that is being saved
     gint64 last_red_ms = 0;
     guint evidence_timer = 0;
+    // Orange image evidence (no video): up to 3 annotated JPEGs while the alarm stays Orange.
+    std::filesystem::path snap_dir;       // empty when no set is running
+    std::string snap_stamp;
+    gint64 snap_start_ms = 0, snap_last_start_ms = 0;
+    int snap_taken = 0;
+    guint snap_timer = 0;
     gint64 pace_last_us = 0, pace_last_pts = -1, gate_bypass_until_us = 0; // live pacer state (pacer thread only); reset per pipeline
     int gate_misses = 0;
     std::atomic<gint64> rec_last_pts{0};  // last timestamp given to the recording branch
@@ -197,6 +206,8 @@ void set_state(Camera& cam, const std::string& state, const std::string& reason)
 void save_clip(const std::string& id);
 void begin_evidence(Camera& cam);
 void end_evidence(Camera& cam, bool force = false);
+void begin_snapshots(Camera& cam);
+void end_snapshots(Camera& cam);
 
 // ---- Live branch candidates -------------------------------------------------------------------------------------
 // Decode on the GPU (d3d11h264dec): the camera stream has B-frames, which the software OpenH264 decoder cannot follow.
@@ -441,6 +452,7 @@ void teardown_pipeline(Camera& cam) {
     cam.pipeline = cam.webrtc = cam.live_tee = cam.live_bin = cam.live_queue = cam.webrtc_filter = nullptr;
     cam.answer_sent = false;
     end_evidence(cam, true); // an unfinished episode without Red is dropped; a pending or saved clip stays
+    end_snapshots(cam);      // images already saved stay and are reported
 }
 
 void start_pipeline(Camera& cam);
@@ -815,6 +827,9 @@ gboolean on_bus(GstBus*, GstMessage* msg, gpointer user) {
             // Evidence: starts at the first alarm state (Yellow), is kept on Red, and is dropped if the episode ends without Red.
             if (state == "None") end_evidence(*cam);
             else if (std::string(gst_structure_get_string(s, "previous")) == "None") begin_evidence(*cam);
+            // Orange: image evidence. Any other state ends the running set (Red keeps the images and makes its video clip as before).
+            if (state == "Orange") begin_snapshots(*cam);
+            else end_snapshots(*cam);
             if (state == "Red") save_clip(cam->id);
         }
     }
@@ -1446,6 +1461,80 @@ void end_evidence(Camera& cam, bool force) {
         std::filesystem::remove_all(cam.evidence_dir, ec);
     }
     clear_evidence(cam);
+}
+
+// ---- Orange image evidence ---------------------------------------------------------------------------------------
+// The newest 1280x720 detection frame with the same burn-in (boxes, mask outlines, labels) the live video carries.
+bool write_snapshot(const Camera& cam, const std::filesystem::path& file) {
+    if (!inference) return false;
+    std::vector<rigmind::DrawResult> results;
+    const auto frame = inference->latest_annotated(results);
+    if (!frame || frame->width != 1280 || frame->height != 720 || frame->rgb.size() != static_cast<std::size_t>(1280) * 720 * 3) return false;
+    cv::Mat rgb(720, 1280, CV_8UC3, const_cast<std::uint8_t*>(frame->rgb.data()));
+    cv::Mat bgr;
+    cv::cvtColor(rgb, bgr, cv::COLOR_RGB2BGR);
+    if (!results.empty()) rigmind::draw_overlay(bgr, results);
+    try {
+        return cv::imwrite(file.string(), bgr, {cv::IMWRITE_JPEG_QUALITY, 85});
+    } catch (const cv::Exception&) {
+        return false;
+    }
+}
+
+gboolean snapshot_tick(gpointer data) {
+    const auto* ref = static_cast<Ref*>(data); // freed by the source's destroy notify
+    auto it = cameras.find(ref->id);
+    if (it == cameras.end() || it->second.snap_dir.empty() || !it->second.snap_timer) return G_SOURCE_REMOVE;
+    Camera& cam = it->second;
+    const gint64 elapsed = wall_ms() - cam.snap_start_ms;
+    // Missing slots are retried on the next tick (a frame may not have arrived yet).
+    while (cam.snap_taken < rigmind::snapshots_due(elapsed)) {
+        if (!write_snapshot(cam, cam.snap_dir / rigmind::snapshot_file_name(cam.snap_taken + 1))) break;
+        ++cam.snap_taken;
+    }
+    if (rigmind::snapshot_set_complete(cam.snap_taken, elapsed)) {
+        cam.snap_timer = 0; // this source returns G_SOURCE_REMOVE
+        end_snapshots(cam);
+        return G_SOURCE_REMOVE;
+    }
+    return G_SOURCE_CONTINUE;
+}
+
+// The alarm entered Orange: the first image now, the next ones 3 s and 6 s later while the state stays Orange.
+void begin_snapshots(Camera& cam) {
+    if (!cam.snap_dir.empty()) return;
+    const gint64 now = wall_ms();
+    if (!rigmind::snapshot_set_allowed(cam.snap_last_start_ms, now)) return;
+    cam.snap_last_start_ms = cam.snap_start_ms = now;
+    // The stamp names the folder: it must differ from the video episode's (None -> Orange starts both in the same millisecond).
+    cam.snap_stamp = std::to_string(cam.evidence_stamp == std::to_string(now) ? now + 1 : now);
+    cam.snap_dir = std::filesystem::path(data_root) / "footage" / cam.id / cam.snap_stamp;
+    std::error_code ec;
+    std::filesystem::create_directories(cam.snap_dir, ec);
+    if (ec) {
+        cam.snap_dir.clear();
+        return;
+    }
+    cam.snap_taken = 0;
+    if (write_snapshot(cam, cam.snap_dir / rigmind::snapshot_file_name(1))) cam.snap_taken = 1;
+    cam.snap_timer = g_timeout_add_full(G_PRIORITY_DEFAULT, 500, snapshot_tick, new Ref{cam.id, cam.generation, 0, "", false},
+                                        [](gpointer p) { delete static_cast<Ref*>(p); });
+}
+
+// The set is over (3 images, the alarm left Orange, or the stream closed): what exists is reported once, nothing if empty.
+void end_snapshots(Camera& cam) {
+    if (cam.snap_dir.empty()) return;
+    if (cam.snap_timer) g_source_remove(cam.snap_timer);
+    cam.snap_timer = 0;
+    if (cam.snap_taken > 0) {
+        emit({{"ev", "snapshot"}, {"cam", cam.id}, {"stamp", cam.snap_stamp}, {"count", cam.snap_taken}, {"state", "Orange"}});
+    } else {
+        std::error_code ec;
+        std::filesystem::remove_all(cam.snap_dir, ec);
+    }
+    cam.snap_dir.clear();
+    cam.snap_stamp.clear();
+    cam.snap_taken = 0;
 }
 
 void handle_command(const std::string& text) {

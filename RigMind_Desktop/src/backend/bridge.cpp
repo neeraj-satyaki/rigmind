@@ -185,13 +185,14 @@ std::string Bridge::handle(const std::string& request_json) {
         } else if (method == "footage.files") {
             result = store_.list_footage_files(require_string(params, "path", 64));
         } else if (method == "footage.record") {
-            // Sent by the host when the pipeline finishes a clip: {cam, stamp, count}.
+            // Sent by the host when the pipeline finishes a clip or an image set: {cam, stamp, count, kind: video|image}.
             const std::string cam = require_string(params, "cam", 32);
             const std::string stamp = require_string(params, "stamp", 20);
             const int count = params.at("count").get<int>();
             if (count < 0 || count > 1000) throw std::runtime_error("invalid count");
-            store_.record_footage(cam, std::stoll(stamp), count, cam + "/" + stamp);
-            audit_event("footage.save", cam, std::to_string(count) + " clips");
+            const std::string kind = params.value("kind", std::string("video"));
+            store_.record_footage(cam, std::stoll(stamp), count, cam + "/" + stamp, kind);
+            audit_event("footage.save", cam, std::to_string(count) + (kind == "image" ? " images" : " clips"));
             result = {{"pruned", store_.prune_footage(now_ms())}};
         } else if (method == "audit.write") {
             // UI actions: batch of {ts, action, target, detail}. Overlong text is clipped, not rejected.

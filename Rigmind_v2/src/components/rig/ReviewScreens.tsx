@@ -514,11 +514,61 @@ function DemoEventInvestigation({ eventId }: { eventId: string }) {
   );
 }
 
-type FootageSet = { id: number; camId: string; timestampMs: number; clipCount: number; path: string; expiresMs: number };
+/** kind: "video" = Red alarm clip set, "image" = Orange alarm snapshots. Rows from older hosts have no kind and are video. */
+type FootageSet = { id: number; camId: string; timestampMs: number; clipCount: number; path: string; expiresMs: number; kind?: "video" | "image" };
 
 const FOOTAGE_HOST = "https://footage.rigmind.app";
 
-/** One saved alarm: its 10 s segments, played straight from the footage folder. */
+/** One Orange alarm: its snapshots (orange-1.jpg ...), shown straight from the footage folder. No video exists for Orange. */
+function ImageCard({ set }: { set: FootageSet }) {
+  const [images, setImages] = useState<string[] | null>(null),
+    [shown, setShown] = useState(0),
+    [error, setError] = useState("");
+  useEffect(() => {
+    let live = true;
+    nativeCall<{ images?: string[] }>("footage.files", { path: set.path })
+      .then((r) => live && setImages(r.images ?? []))
+      .catch((e) => live && setError(String(e)));
+    return () => {
+      live = false;
+    };
+  }, [set.path]);
+  const when = new Date(set.timestampMs).toLocaleString("en-GB", { dateStyle: "medium", timeStyle: "medium" });
+  const left = Math.max(0, Math.ceil((set.expiresMs - Date.now()) / 86_400_000));
+  const src = (f: string) => `${FOOTAGE_HOST}/${set.path}/${f}`;
+  return (
+    <div className="space-y-2 rounded-lg border border-border bg-card p-3" data-testid="image-evidence">
+      {images && images.length > 0 ? (
+        <>
+          <img src={src(images[Math.min(shown, images.length - 1)] ?? images[0]!)} alt={`${set.camId} Orange alarm image ${shown + 1}`} className="aspect-video w-full rounded bg-slate object-contain" />
+          <div className="flex gap-2">
+            {images.map((f, i) => (
+              <button key={f} type="button" onClick={() => setShown(i)} className={`overflow-hidden rounded border ${i === shown ? "border-primary" : "border-border"}`}>
+                <img src={src(f)} alt={`${set.camId} thumbnail ${i + 1}`} className="h-12 w-20 object-cover" />
+              </button>
+            ))}
+          </div>
+        </>
+      ) : (
+        <div className="flex aspect-video w-full items-center justify-center rounded bg-slate text-xs text-slate-foreground/70">
+          {error || (images ? "No image files found on disk" : `${set.clipCount} image${set.clipCount === 1 ? "" : "s"} saved`)}
+        </div>
+      )}
+      <div>
+        <Mono>{set.camId}</Mono>
+        <span className="ml-2 text-xs text-muted-foreground">{when}</span>
+        <div className="mt-1 flex gap-2">
+          <Chip tone="warning">Orange - image evidence</Chip>
+          <Chip tone="success" dot>
+            {left} day{left === 1 ? "" : "s"} left
+          </Chip>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/** One saved Red alarm: its 10 s segments, played straight from the footage folder. */
 function FootageCard({ set }: { set: FootageSet }) {
   const [files, setFiles] = useState<string[] | null>(null),
     [current, setCurrent] = useState(0),
@@ -552,7 +602,7 @@ function FootageCard({ set }: { set: FootageSet }) {
           <Mono>{set.camId}</Mono>
           <span className="ml-2 text-xs text-muted-foreground">{when}</span>
           <div className="mt-1 flex gap-2">
-            <Chip tone="critical">Red alarm</Chip>
+            <Chip tone="critical">Red - video evidence</Chip>
             <Chip tone="success" dot>
               {left} day{left === 1 ? "" : "s"} left
             </Chip>
@@ -589,7 +639,7 @@ export function EvidenceLibrary() {
     nativeCall<FootageSet[]>("footage.list", { limit: 200 })
       .then((r) => {
         setSets(r);
-        if (announce) toast.success(r.length ? `${r.length} saved clip set${r.length === 1 ? "" : "s"}` : "No footage saved yet");
+        if (announce) toast.success(r.length ? `${r.length} saved evidence set${r.length === 1 ? "" : "s"}` : "No evidence saved yet");
       })
       .catch((e) => announce && toast.error("Footage could not be listed", { description: String(e) }))
       .finally(() => setLoaded(true));
@@ -612,7 +662,7 @@ export function EvidenceLibrary() {
             </Btn>
             <Btn onClick={() => (native ? void refresh(true) : toast("Footage is saved by the desktop app"))}>
               <RefreshCw className="size-4" />
-              Refresh clips
+              Refresh evidence
             </Btn>
           </>
         }
@@ -621,7 +671,7 @@ export function EvidenceLibrary() {
         value={tab}
         onChange={setTab}
         tabs={[
-          { id: "clips", label: "Event clips" },
+          { id: "clips", label: "Event evidence" },
           { id: "continuous", label: "Continuous recordings" },
           { id: "hold", label: "On hold" },
         ]}
@@ -634,19 +684,19 @@ export function EvidenceLibrary() {
           onChange={setCamera}
         />
         <span className="ml-auto text-xs text-muted-foreground">
-          {tab === "clips" ? rows.length : 0} saved clip set{rows.length === 1 && tab === "clips" ? "" : "s"}
+          {tab === "clips" ? rows.length : 0} saved evidence set{rows.length === 1 && tab === "clips" ? "" : "s"}
         </span>
       </div>
       {tab === "clips" ? (
         rows.length ? (
           <div className={grid ? "grid gap-4 md:grid-cols-2 xl:grid-cols-3" : "grid gap-4"}>
             {rows.map((c) => (
-              <FootageCard key={c.id} set={c} />
+              c.kind === "image" ? <ImageCard key={c.id} set={c} /> : <FootageCard key={c.id} set={c} />
             ))}
           </div>
         ) : (
           <div className="py-16 text-center text-muted-foreground">
-            {loaded ? "No footage saved yet. Clips are saved when an alarm reaches Red." : "Loading footage"}
+            {loaded ? "No evidence saved yet. Orange alarms save images; Red alarms save a video clip." : "Loading evidence"}
           </div>
         )
       ) : (
