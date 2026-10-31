@@ -179,7 +179,9 @@ export function NavSearch() {
 }
 export function Notifications() {
   const [open, setOpen] = useState(false);
-  const { items } = useAppState();
+  const { items: feedItems } = useAppState();
+  // Yellow is the quiet "monitoring" state: it never reaches the bell (Orange and Red do, and PPE advisories).
+  const items = feedItems.filter((a) => a.condition !== "Yellow monitoring");
   const realCam = useRealCameras(useStreamSources(false, !demoDataEnabled()))[0]?.id;
   // One bell row per incident: `at` is when it first reached the bell, `updatedAt` its last change.
   const [extra, setExtra] = useState<(RaisedAlert & { at: number; updatedAt: number })[]>([]),

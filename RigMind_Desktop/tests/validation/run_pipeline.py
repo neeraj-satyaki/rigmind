@@ -4,7 +4,7 @@ Prints a summary: event counts, 'facts' % table (ROI on / off), angle distributi
 import json, os, subprocess, sys, threading, time, statistics, collections
 secs = int(sys.argv[1]); out = sys.argv[2]
 d = sys.argv[3] if len(sys.argv) > 3 else r"D:\Projects\rigmind\RigMind_Desktop\build-app\Release"
-uri = sys.argv[4] if len(sys.argv) > 4 else "rtsp://192.168.1.8:8556/feed0"
+uri = sys.argv[4] if len(sys.argv) > 4 else "rtsp://192.168.1.8:8554/feed0"
 env = dict(os.environ)
 env["PATH"] = r"C:\gstreamer\1.0\msvc_x86_64\bin;" + env["PATH"]
 env.setdefault("RIGMIND_GPU_DIR", r"D:\Projects\rigmind\RigMind_Desktop\runtime-windows\gpu")

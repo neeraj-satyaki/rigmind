@@ -23,7 +23,7 @@ ROOT = Path(__file__).resolve().parents[2]
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--uri", default="rtsp://192.168.1.8:8556/feed0")
+    ap.add_argument("--uri", default="rtsp://192.168.1.8:8554/feed0")
     ap.add_argument("--seconds", type=float, default=40)
     ap.add_argument("--exe", default=str(ROOT / "build" / "Release" / "rigmind-pipeline.exe"))
     ap.add_argument("--plugin", default=str(ROOT / "build" / "Release" / "librigmindews.dll"))

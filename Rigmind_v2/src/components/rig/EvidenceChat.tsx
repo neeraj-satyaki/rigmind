@@ -75,8 +75,15 @@ export function EvidenceChat() {
       );
     });
   }, []);
-  useEffect(() => end.current?.scrollIntoView?.({ block: "end" }), [msgs, open]);
-  useEffect(() => () => timers.current.forEach(clearTimeout), []);
+  useEffect(() => {
+    end.current?.scrollIntoView?.({ block: "end" });
+  }, [msgs, open]);
+  useEffect(
+    () => () => {
+      timers.current.forEach((t) => clearTimeout(t));
+    },
+    [],
+  );
 
   // Save the session once its turns have settled (no answer still being written).
   useEffect(() => {

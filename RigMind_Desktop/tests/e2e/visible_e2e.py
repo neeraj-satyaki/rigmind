@@ -33,7 +33,7 @@ BITNET = True
 SAMPLE_STRINGS = ["EV-1042", "Faisal A.", "Maha S.", "Demo rig 01", "faisal.demo@example.com"]
 ERR_PAGE_RE = re.compile(r"Page not found|\b404\b|This page didn't load|Something went wrong|Not Found", re.I)
 BENIGN_CONSOLE = re.compile(r"fonts\.(googleapis|gstatic)|favicon|ERR_INTERNET_DISCONNECTED|ERR_NAME_NOT_RESOLVED|net::ERR_FAILED.*font|Autofocus", re.I)
-RTSP_URI = "rtsp://192.168.1.8:8556/feed0"
+RTSP_URI = "rtsp://192.168.1.8:8554/feed0"
 E2E_EMAIL = "e2e.operator@satyaki-e2e.test"
 E2E_USER = "e2e.operator"             # the account the test creates on the first start (the host keeps only a salted hash)
 E2E_PASS = "Rig-Mind-E2E-2026!"       # 10+ characters, letters and symbols, does not contain the username
@@ -984,7 +984,7 @@ PAGES = [
 def check_page(ui: UI, ph: str, label: str, path: str, demo: bool, store: dict) -> None:
     body = ui.body()
     cur = ui.path()
-    bad = ERR_PAGE_RE.search(body)
+    bad = ERR_PAGE_RE.search(re.sub(r"#\d+", "", body))  # audit row numbers (#404) are not error pages
     R.add(ph, f"{label}: renders ({cur})", path in cur and not bad and len(body) > 80, f"{len(body)} chars" + (f"; ERROR TEXT {bad.group(0)!r}" if bad else ""))
     found = [s for s in SAMPLE_STRINGS if s in body]
     store[label] = found
@@ -1807,11 +1807,38 @@ def phase5_pages(ctx, a) -> None:
                 ui.nav("Event history")
             else:
                 R.add(ph, "event detail page", None, "no events exist yet (empty state), so there is no event to open")
-    guarded(ph, "top bar CTA sweep", topbar_sweep, ui, ph, a)
-    guarded(ph, "navigate away from Live and back", live_resume_check, ui, ph)
+    if not a.pages:  # a --pages subset skips the whole-app checks
+        guarded(ph, "top bar CTA sweep", topbar_sweep, ui, ph, a)
+        guarded(ph, "navigate away from Live and back", live_resume_check, ui, ph)
     if demo:
         any_sample = {k: v for k, v in samples.items() if v}
         R.add(ph, "demo ON: pages show sample content", bool(any_sample), json.dumps(any_sample)[:300] or "no sample strings on any page")
+
+
+def evidence_chat_check(ui: UI, ph: str) -> None:
+    """Open the evidence chat, start a new chat (regression: TypeError on New chat), ask BitNet a question and wait for the answer."""
+    pg = ui.page
+    n_err = len(ui.errors)
+    ui.click(pg.get_by_role("button", name="Ask about evidence").first, wait=1.0)
+    ui.click(pg.get_by_role("button", name="New chat").first, wait=1.0)
+    box = pg.get_by_label("Your question")
+    ui.hl(box, 400)
+    box.fill("List all evidence from the last 7 days")  # no kind/camera filter, so any saved evidence matches and the model is asked to explain it
+    pause(0.5)
+    ui.click(pg.get_by_role("button", name="Send question").first, wait=1.0)
+    t0 = time.time()
+    txt = ""
+    while time.time() - t0 < 180:
+        txt = pg.locator("[aria-label='Ask about evidence']").last.inner_text(timeout=5000)
+        if "BitNet is writing" not in txt and ("BitNet" in txt or time.time() - t0 > 20):
+            break
+        time.sleep(2)
+    ui.shot("5-evidence-chat")
+    took = time.time() - t0
+    R.add(ph, "Evidence chat: New chat raised no console error", len(ui.errors) == n_err, "; ".join(m for _, m in ui.errors[n_err:])[:300])
+    R.add(ph, "Evidence chat: reply received", "List all evidence" in txt and len(txt) > 60, f"{took:.0f}s, {len(txt)} chars")
+    R.add(ph, "Evidence chat: BitNet wrote the explanation", "BitNet is writing" not in txt and "BitNet" in txt, f"{took:.0f}s; tail={txt[-160:]!r}")
+    ui.click(pg.get_by_role("button", name="Close chat").first, wait=0.5)
 
 
 def live_resume_check(ui: UI, ph: str) -> None:
@@ -1897,7 +1924,7 @@ def phase6_live(ctx, a) -> None:
     stamps = STAMP_RE.findall(txt)
     if "Orange" in seen or "Red" in seen:
         R.add(ph, "bell lists Orange/Red alerts coloured + timestamped", bool(stamps) and (sev["Warning"] + sev["Critical"] > 0), f"severities={sev}, {len(stamps)} timestamps")
-        ppe_rows = len(re.findall(r"PPE not detected", txt))
+        ppe_rows = len(re.findall(r"PPE not detected|PPE-[A-Z0-9-]+", txt))
         non_ppe = max(0, sev["Advisory"] - ppe_rows)  # PPE advisories are legitimate; a Yellow alarm must add none
         R.add(ph, "Yellow stays quiet (no non-PPE Advisory in bell)", non_ppe == 0, f"Advisory entries in bell: {sev['Advisory']} (of which PPE: {ppe_rows})")
     else:
@@ -1946,6 +1973,7 @@ def phase6_live(ctx, a) -> None:
         ui.nav("Evidence library")
     ui.shot("6-evidence")
     R.add(ph, "Evidence library lists saved footage", True if n_clip else None, f"{n_clip} clip elements" if n_clip else f"not observed within {a.evidence_wait}s (needs a finished Red episode)")
+    guarded(ph, "Evidence chat: new chat + BitNet prompt", evidence_chat_check, ui, ph)  # after live, so this session has saved evidence
     # BitNet: ask for a plain-language summary through the bridge and wait for the audited result.
     if BITNET:
         try:

@@ -276,7 +276,8 @@ std::string Bridge::handle_impl(const std::string& request_json, bool trusted) {
                 const std::string id = a.value("id", std::string());
                 if (!query.cam.empty() && id.find(query.cam) == std::string::npos && a.value("place", std::string()).find(query.cam) == std::string::npos) continue;
                 if (++alert_count > 6) break;
-                const std::string summary = clip(a.value("summary", std::string()), 200);
+                // "summary" is an explicit null until BitNet has written it; value() would throw on a null.
+                const std::string summary = clip(a.contains("summary") && a["summary"].is_string() ? a["summary"].get<std::string>() : std::string(), 200);
                 alert_lines += id + " | " + a.value("severity", std::string()) + " | " + a.value("phase", std::string()) + " | " + local_stamp(at) + " | " +
                                (summary.empty() ? std::string("no summary yet") : summary) + "\n";
             }

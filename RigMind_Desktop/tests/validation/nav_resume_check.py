@@ -6,7 +6,7 @@ Env: OFFSECS (seconds away from Live, default 15), ONSECS (seconds on Live betwe
 detection messages while away, default 2 x OFFSECS).
 Per cycle it leaves Live for /alerts or /fleet, counts 'detections' events that keep arriving (monitoring must run with nobody
 watching), returns to /live and requires the video to play again within 3 s and keep advancing. Exit code 1 = FAIL.
-Needs the camera at rtsp://192.168.1.8:8556/feed0 (the default source) and Playwright. Only the processes it started are stopped.
+Needs the camera at rtsp://192.168.1.8:8554/feed0 (the default source) and Playwright. Only the processes it started are stopped.
 Slow-model check: pass RIGMIND_TEST_INFER_DELAY_MS=2500 (and MINDET=2): the video must still resume and events keep flowing."""
 import os, subprocess, sys, time, json, urllib.request, shutil
 from playwright.sync_api import sync_playwright

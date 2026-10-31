@@ -43,7 +43,8 @@ BUILD = REPO / "build-app" / "Release"
 RUNS = REPO.parent / "tests_run"
 E2E_USER = "e2e.operator"
 E2E_PASS = "Rig-Mind-E2E-2026!"
-RTSP_URI = "rtsp://192.168.1.8:8556/feed0"
+RTSP_URI = "rtsp://192.168.1.8:8554/feed0"
+RTSP_URI2 = "rtsp://192.168.1.8:8554/feed1"
 CAMS = ["CAM-01", "CAM-02"]
 MODELS = ["ppe", "idss"]
 NVSMI = next((p for p in (r"C:\Windows\System32\nvidia-smi.exe", r"C:\Program Files\NVIDIA Corporation\NVSMI\nvidia-smi.exe") if Path(p).exists()), None)
@@ -339,10 +340,11 @@ def run_phase(pg, mon: Monitor, name: str) -> dict:
     ncam = 1 if name == "1" else 2
     cams = CAMS[:ncam]
     log(f"=== phase {name}: {ncam} camera(s) {cams}, {view} page ===")
-    sources = {c: A.uri for c in cams}
+    uris = {CAMS[0]: A.uri, CAMS[1]: A.uri2}
+    sources = {c: uris[c] for c in cams}
     bridge(pg, "records.set", {"key": "stream.sources", "value": sources})
     for c in cams:
-        bridge(pg, "stream.open", {"cam": c, "uri": A.uri})
+        bridge(pg, "stream.open", {"cam": c, "uri": uris[c]})
     remount_view(pg, view)
     ph: dict = {"cams": cams, "view": view, "t_open": time.time()}
     ph["online"] = wait_online(pg, cams, 120)
@@ -541,7 +543,7 @@ def md_table(head, rows):
 def write_report(meta: dict, base: dict | None, dual: dict | None, V: list[dict], notes: list[str], tile: dict | None = None) -> None:
     L = ["# RigMind two-camera load test", "",
          f"Run: {meta['started']}  |  host: {meta['host']}  |  GPU: {meta['gpu_name']}  |  RAM total {meta['ram_total_mb']} MB",
-         f"Source for BOTH cameras: `{A.uri}`  |  warm-up {A.warmup} s, measured {A.duration} s per phase, sample every {A.interval} s  |  models run on: {meta.get('providers')}",
+         f"Sources: CAM-01 `{A.uri}`, CAM-02 `{A.uri2}`  |  warm-up {A.warmup} s, measured {A.duration} s per phase, sample every {A.interval} s  |  models run on: {meta.get('providers')}",
          "Build: fresh `build-app\\Release` exes, staged web bundle, installed layout without BitNet, fresh LOCALAPPDATA (signed in as the test account).", ""]
     if dual:
         L += ["## Verdicts", "", md_table(["Check", "Result", "Evidence"], [[v["name"], f"**{v['status']}**", v["evidence"]] for v in V]), ""]
@@ -626,7 +628,8 @@ def main() -> int:
     ap.add_argument("--warmup", type=int, default=60, help="warm-up seconds before each measured phase")
     ap.add_argument("--interval", type=float, default=2.0, help="resource sampling period (s)")
     ap.add_argument("--cameras", default="1,2,tile", help="phases to run: 1 (baseline), 2 (dual, Live page = full profile), tile (dual on the Fleet page = small profile); default 1,2,tile")
-    ap.add_argument("--uri", default=RTSP_URI)
+    ap.add_argument("--uri", default=RTSP_URI, help="CAM-01 stream")
+    ap.add_argument("--uri2", default=RTSP_URI2, help="CAM-02 stream")
     ap.add_argument("--port", type=int, default=9341)
     ap.add_argument("--seed-dir", default=str(RUNS / "app_evidence"), help="installed layout to copy (gst, gpu, models, ...), without BitNet")
     ap.add_argument("--app-dir", default=str(RUNS / "app_dual"), help="private app folder created for this run")
